@@ -59,14 +59,15 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 # PASSO 2: Schermata intermedia Microsoft MFA
                 print("2/3 Conferma schermata intermedia Microsoft MFA...", flush=True)
-                login_mfa_btn = page.locator('input[type="submit"], button').first
-                await login_mfa_btn.wait_for(state="visible", timeout=20000)
-                await login_mfa_btn.click()
+                await page.wait_for_selector('text=/Microsoft MFA|Autenticazione/i', timeout=20000)
+                await page.locator('input[type="submit"], button').first.click()
 
-                # PASSO 3: Inserimento codice OTP (Microsoft verification code)
+                # PASSO 3: Inserimento codice OTP Authenticator
                 print("3/3 Inserimento codice OTP Authenticator...", flush=True)
-                code_input = page.locator('input[type="text"], input[type="number"]').first
-                await code_input.wait_for(state="visible", timeout=20000)
+                await page.wait_for_selector('text=/verification code/i', timeout=20000)
+                
+                code_input = page.locator('input').first
+                await code_input.wait_for(state="visible", timeout=10000)
 
                 totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
                 await code_input.fill(totp.now())
@@ -74,6 +75,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await page.locator('input[type="submit"], button').first.click()
 
                 # Attesa caricamento Dashboard Leonardo
+                print("Accesso al sistema in corso...", flush=True)
                 await page.wait_for_selector('text=Strumenti', timeout=25000)
 
                 # Accesso alla sezione BDA ANIA
