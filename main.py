@@ -35,7 +35,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
             )
-            # User-Agent per emulare un browser normale
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             )
@@ -46,7 +45,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 print("Navigazione a essig.unipolsai.it...", flush=True)
                 await page.goto("https://essig.unipolsai.it/my-policy", wait_until="domcontentloaded", timeout=30000)
                 
-                # Cerca il campo username con selettore flessibile
                 user_input = page.locator('input[name="Username" i], input[name="username" i], input[id*="user" i]').first
                 await user_input.wait_for(state="visible", timeout=20000)
                 await user_input.fill(UNIPOL_USER or "")
@@ -54,9 +52,19 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 pass_input = page.locator('input[type="password"]').first
                 await pass_input.fill(UNIPOL_PASS or "")
 
-                domain_select = page.locator('select[name="Domain" i], select[id*="domain" i]').first
+                # Seleziona il dominio "Uniage" corretto
+                domain_select = page.locator('select[name="domain" i], select[id*="domain" i]').first
                 if await domain_select.is_visible():
-                    await domain_select.select_option(value="Unisage")
+                    try:
+                        await domain_select.select_option(label="Uniage", timeout=3000)
+                    except Exception:
+                        try:
+                            await domain_select.select_option(value="Uniage", timeout=3000)
+                        except Exception:
+                            try:
+                                await domain_select.select_option(value="UNIAGE", timeout=3000)
+                            except Exception:
+                                pass
 
                 login_btn = page.locator('button:has-text("Login"), input[type="submit"][value*="Login" i], button[type="submit"]').first
                 await login_btn.click()
