@@ -66,31 +66,35 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 print("3/3 Inserimento codice OTP Authenticator...", flush=True)
                 await page.wait_for_selector('text=/verification code/i', timeout=20000)
                 
-                code_input = page.locator('input').first
+                code_input = page.locator('input[type="text"], input[type="number"], input').first
                 await code_input.wait_for(state="visible", timeout=10000)
 
                 totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
                 await code_input.fill(totp.now())
 
-                await page.locator('input[type="submit"], button').first.click()
+                # Invio form OTP tramite tasto Invio
+                print("Invio OTP e attesa reindirizzamento Leonardo...", flush=True)
+                await code_input.press("Enter")
+                await page.wait_for_timeout(5000)
+                print(f"URL corrente dopo OTP: {page.url}", flush=True)
 
                 # PASSO 4: Caricamento Dashboard Leonardo e Menu BDA ANIA
-                print("In attesa del caricamento della Dashboard Leonardo (max 50s)...", flush=True)
-                strumenti_btn = page.locator('text="Strumenti" i').first
-                await strumenti_btn.wait_for(state="visible", timeout=50000)
+                print("In attesa del menu Strumenti...", flush=True)
+                strumenti_btn = page.locator('text="Strumenti" i, button:has-text("Strumenti")').first
+                await strumenti_btn.wait_for(state="visible", timeout=60000)
                 await strumenti_btn.click()
 
                 print("Apertura menu BDA ANIA...", flush=True)
                 danni_btn = page.locator('text="DANNI" i').first
-                await danni_btn.wait_for(state="visible", timeout=10000)
+                await danni_btn.wait_for(state="visible", timeout=15000)
                 await danni_btn.click()
 
                 rca_btn = page.locator('text="RCA AUTO" i').first
-                await rca_btn.wait_for(state="visible", timeout=10000)
+                await rca_btn.wait_for(state="visible", timeout=15000)
                 await rca_btn.click()
 
                 bda_btn = page.locator('text="CONSULTAZIONE BDA" i').first
-                await bda_btn.wait_for(state="visible", timeout=10000)
+                await bda_btn.wait_for(state="visible", timeout=15000)
                 await bda_btn.click()
 
                 # PASSO 5: Ricerca Targa
@@ -146,6 +150,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
             except Exception as e:
                 err_msg = str(e)[:250]
                 print(f"[{record_id}] ERRORE: {err_msg}", flush=True)
+                print(f"URL al momento dell'errore: {page.url}", flush=True)
                 requests.patch(
                     url_trattativa,
                     headers=headers,
