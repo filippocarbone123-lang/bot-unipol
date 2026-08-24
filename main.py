@@ -118,30 +118,30 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 print("Ingresso nel Preventivatore Unipol...", flush=True)
                 await asyncio.sleep(3)
 
-                prodotti_btn = page.locator('button:has-text("PRODOTTI"), a:has-text("PRODOTTI"), text="PRODOTTI"').first
+                prodotti_btn = page.get_by_text("PRODOTTI", exact=True).first
                 await prodotti_btn.wait_for(state="visible", timeout=20000)
                 await prodotti_btn.click(force=True)
 
-                altri_danni_btn = page.locator('text="ALTRI PRODOTTI DANNI", input[value*="DANNI" i]').first
+                altri_danni_btn = page.get_by_text("ALTRI PRODOTTI DANNI", exact=True).first
                 await altri_danni_btn.wait_for(state="visible", timeout=15000)
                 await altri_danni_btn.click(force=True)
 
-                conferma_btn = page.locator('button:has-text("CONFERMA"), input[value*="CONFERMA" i]').first
+                conferma_btn = page.get_by_text("CONFERMA", exact=True).first
                 await conferma_btn.click(force=True)
 
-                auto_natanti_btn = page.locator('text="AUTO/NATANTI"').first
+                auto_natanti_btn = page.get_by_text("AUTO/NATANTI", exact=True).first
                 await auto_natanti_btn.wait_for(state="visible", timeout=15000)
                 await auto_natanti_btn.click(force=True)
                 await conferma_btn.click(force=True)
 
-                rca_singole_btn = page.locator('text="RCA SINGOLE"').first
+                rca_singole_btn = page.get_by_text("RCA SINGOLE", exact=True).first
                 await rca_singole_btn.wait_for(state="visible", timeout=15000)
                 await rca_singole_btn.click(force=True)
                 await conferma_btn.click(force=True)
 
                 # Compilazione Targa con spazi e CIP 125
                 print("Compilazione maschera Preventivo (CIP 125 e Targa con spazi)...", flush=True)
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(4000)
 
                 target_frame = page.main_frame
                 for frame in page.frames:
@@ -205,10 +205,10 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await page.goto(leonardo_url, wait_until="domcontentloaded", timeout=20000)
                 await asyncio.sleep(2)
 
-                strumenti_btn = page.locator('text="Strumenti"').first
-                danni_btn = page.locator('text="Danni"').first
-                rca_btn = page.locator('text="RCA AUTO"').first
-                bda_btn = page.locator('text="CONSULTAZIONE BDA", text="BDA"').first
+                strumenti_btn = page.get_by_text("Strumenti", exact=True).first
+                danni_btn = page.get_by_text("Danni", exact=True).first
+                rca_btn = page.get_by_text("RCA AUTO", exact=True).first
+                bda_btn = page.get_by_text("CONSULTAZIONE BDA", exact=True).first
 
                 for _ in range(10):
                     try:
