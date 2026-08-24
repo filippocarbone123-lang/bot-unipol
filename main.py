@@ -23,7 +23,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
         }
         url_trattativa = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Trattative/{record_id}"
 
-        # 1. Imposta subito lo stato su Airtable come "In Corso"
         print(f"[{record_id}] Avvio elaborazione per targa: {targa}", flush=True)
         requests.patch(
             url_trattativa,
@@ -36,40 +35,61 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
             )
-            context = await browser.new_context()
+            # User-Agent per emulare un browser normale
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            )
             page = await context.new_page()
 
             try:
-                # 2. Accesso Unipol
+                # 1. Accesso Unipol
                 print("Navigazione a essig.unipolsai.it...", flush=True)
-                await page.goto("https://essig.unipolsai.it/my-policy")
-                await page.fill('input[name="Username"]', UNIPOL_USER or "")
-                await page.fill('input[name="Password"]', UNIPOL_PASS or "")
-                await page.select_option('select[name="Domain"]', value="Unisage")
-                await page.click('button:has-text("Login")')
+                await page.goto("https://essig.unipolsai.it/my-policy", wait_until="domcontentloaded", timeout=30000)
+                
+                # Cerca il campo username con selettore flessibile
+                user_input = page.locator('input[name="Username" i], input[name="username" i], input[id*="user" i]').first
+                await user_input.wait_for(state="visible", timeout=20000)
+                await user_input.fill(UNIPOL_USER or "")
 
-                # 3. OTP 2FA
+                pass_input = page.locator('input[type="password"]').first
+                await pass_input.fill(UNIPOL_PASS or "")
+
+                domain_select = page.locator('select[name="Domain" i], select[id*="domain" i]').first
+                if await domain_select.is_visible():
+                    await domain_select.select_option(value="Unisage")
+
+                login_btn = page.locator('button:has-text("Login"), input[type="submit"][value*="Login" i], button[type="submit"]').first
+                await login_btn.click()
+
+                # 2. Inserimento OTP 2FA
                 print("Inserimento codice OTP...", flush=True)
-                totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
-                await page.fill('input[name="code"]', totp.now())
-                await page.click('button:has-text("Login")')
-                await page.wait_for_selector('text=Strumenti', timeout=15000)
+                code_input = page.locator('input[name="code" i], input[id*="code" i], input[type="number"]').first
+                await code_input.wait_for(state="visible", timeout=20000)
 
-                # 4. Navigazione BDA
+                totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
+                await code_input.fill(totp.now())
+                
+                login_btn_2fa = page.locator('button:has-text("Login"), input[type="submit"]').first
+                await login_btn_2fa.click()
+                
+                await page.wait_for_selector('text=Strumenti', timeout=20000)
+
+                # 3. Navigazione BDA ANIA
                 print("Accesso alla sezione BDA ANIA...", flush=True)
                 await page.click('text=Strumenti')
                 await page.click('text=DANNI')
                 await page.click('text=RCA AUTO')
                 await page.click('text=CONSULTAZIONE BDA')
 
-                # 5. Ricerca Targa
+                # 4. Ricerca Targa
                 print(f"Inserimento targa {targa} in BDA...", flush=True)
-                await page.wait_for_selector('input[name="targa"]')
-                await page.fill('input[name="targa"]', targa)
+                targa_input = page.locator('input[name="targa" i], input[id*="targa" i]').first
+                await targa_input.wait_for(state="visible", timeout=15000)
+                await targa_input.fill(targa)
                 await page.click('button:has-text("Avanti")')
 
-                # 6. Lettura Dati Tecnici
-                await page.wait_for_selector('text=Dati veicolo', timeout=10000)
+                # 5. Lettura Dati Tecnici
+                await page.wait_for_selector('text=Dati veicolo', timeout=15000)
                 marca = await page.locator('td:has-text("Marca:") + td').text_content() or ""
                 modello = await page.locator('td:has-text("Descrizione modello:") + td').text_content() or ""
                 kw = await page.locator('td:has-text("KW:") + td').text_content() or ""
@@ -77,7 +97,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 data_immat = await page.locator('td:has-text("Data prima immatricolazione:") + td').text_content() or ""
                 alimentazione = await page.locator('td:has-text("Alimentazione:") + td').text_content() or ""
 
-                # 7. Attestato e CU
+                # 6. Attestato e CU
                 btn_attestato = page.locator('button:has-text("Visualizza Attestato")')
                 classe_cu = ""
                 compagnia_provenienza = ""
@@ -88,7 +108,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     classe_cu = await page.locator('td:has-text("Classe CU:") + td').text_content() or ""
                     compagnia_provenienza = await page.locator('td:has-text("Impresa:") + td').text_content() or ""
 
-                # 8. Scrittura finale su Airtable
+                # 7. Aggiornamento Airtable
                 print("Salvataggio dati estratti su Airtable...", flush=True)
                 payload_trattativa = {
                     "fields": {
