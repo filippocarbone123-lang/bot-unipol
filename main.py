@@ -40,8 +40,8 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
             page = await context.new_page()
 
             try:
-                # 1. Credenziali
-                print("1/3 Navigazione e inserimento User/Pass...", flush=True)
+                # 1. Login Credenziali
+                print("1/3 Inserimento Username e Password...", flush=True)
                 await page.goto("https://essig.unipolsai.it/my-policy", wait_until="domcontentloaded", timeout=40000)
                 
                 user_input = page.locator('input[name="Username" i], input[name="username" i]').first
@@ -66,44 +66,56 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await login_mfa_btn.wait_for(state="visible", timeout=25000)
                 await login_mfa_btn.click()
 
-                # 3. OTP Authenticator
+                # 3. OTP Authenticator con digitazione tasto per tasto
                 print("3/3 Inserimento OTP Authenticator...", flush=True)
                 code_input = page.locator('input[type="text"], input[type="number"], input').first
                 await code_input.wait_for(state="visible", timeout=25000)
 
                 totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
-                await code_input.fill(totp.now())
+                codice_otp = totp.now()
+                
+                # Digitazione lenta per attivare gli eventi JavaScript di Microsoft
+                await code_input.type(codice_otp, delay=100)
+                await asyncio.sleep(1)
 
                 submit_otp = page.locator('input[type="submit"], button').first
                 await submit_otp.click()
 
-                # 4. Attesa dinamica comparsa Dashboard Leonardo
-                print("In attesa che il menu Strumenti sia visibile...", flush=True)
-                strumenti_btn = page.locator('text="Strumenti" i, button:has-text("Strumenti"), a:has-text("Strumenti")').first
-                await strumenti_btn.wait_for(state="visible", timeout=60000)
+                # 4. Attesa cambio URL verso WorkspaceWeb (Leonardo)
+                print("Attesa reindirizzamento alla Dashboard Leonardo...", flush=True)
+                try:
+                    await page.wait_for_url("**/WorkspaceWeb/**", timeout=30000)
+                except Exception:
+                    print(f"URL non cambiato subito. URL attuale: {page.url}", flush=True)
+
+                print(f"Accesso confermato! URL attuale: {page.url}", flush=True)
+
+                # 5. Selezione Menu Strumenti
+                print("In attesa del menu Strumenti...", flush=True)
+                strumenti_btn = page.locator('text="Strumenti"').first
+                await strumenti_btn.wait_for(state="visible", timeout=30000)
                 await strumenti_btn.click()
 
-                print("Apertura dinamica menu DANNI...", flush=True)
-                danni_btn = page.locator('text="DANNI" i').first
-                await danni_btn.wait_for(state="visible", timeout=20000)
+                print("Apertura menu DANNI...", flush=True)
+                danni_btn = page.locator('text="DANNI"').first
+                await danni_btn.wait_for(state="visible", timeout=15000)
                 await danni_btn.click()
 
-                print("Apertura dinamica menu RCA AUTO...", flush=True)
-                rca_btn = page.locator('text="RCA AUTO" i').first
-                await rca_btn.wait_for(state="visible", timeout=20000)
+                print("Apertura menu RCA AUTO...", flush=True)
+                rca_btn = page.locator('text="RCA AUTO"').first
+                await rca_btn.wait_for(state="visible", timeout=15000)
                 await rca_btn.click()
 
-                print("Apertura dinamica CONSULTAZIONE BDA...", flush=True)
-                bda_btn = page.locator('text="CONSULTAZIONE BDA" i').first
-                await bda_btn.wait_for(state="visible", timeout=20000)
+                print("Apertura CONSULTAZIONE BDA...", flush=True)
+                bda_btn = page.locator('text="CONSULTAZIONE BDA"').first
+                await bda_btn.wait_for(state="visible", timeout=15000)
                 await bda_btn.click()
 
-                # 5. Attesa reattiva mascherina Targa nei frame
-                print(f"In attesa del campo Targa per {targa}...", flush=True)
+                # 6. Compilazione Targa nei frame
+                print(f"Inserimento targa {targa} in BDA...", flush=True)
                 targa_input = None
                 target_frame = page.main_frame
                 
-                # Polling attivo di max 20 secondi
                 for _ in range(20):
                     for frame in page.frames:
                         inp = frame.locator('input[name*="targa" i], input[id*="targa" i]').first
@@ -123,8 +135,8 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 avanti_btn = target_frame.locator('button:has-text("Avanti"), input[value*="Avanti" i]').first
                 await avanti_btn.click()
 
-                # 6. Lettura reattiva dati veicolo
-                print("In attesa della scheda veicolo ANIA...", flush=True)
+                # 7. Estrattore Dati ANIA
+                print("Estrazione dati veicolo...", flush=True)
                 marca, modello, kw, cv, data_immat, alimentazione = "", "", "", "", "", ""
                 
                 found_data = False
@@ -145,7 +157,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         break
                     await asyncio.sleep(1)
 
-                # 7. Attestato e CU
+                # 8. Visualizzazione Attestato e CU
                 classe_cu = ""
                 compagnia_provenienza = ""
                 
@@ -163,7 +175,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                             break
                         await asyncio.sleep(1)
 
-                # 8. Salvataggio Airtable
+                # 9. Scrittura finale su Airtable
                 print("Salvataggio dati estratti su Airtable...", flush=True)
                 payload_trattativa = {
                     "fields": {
@@ -185,6 +197,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
             except Exception as e:
                 err_msg = str(e)[:250]
                 print(f"[{record_id}] ERRORE: {err_msg}", flush=True)
+                print(f"URL finale all'errore: {page.url}", flush=True)
                 requests.patch(
                     url_trattativa,
                     headers=headers,
