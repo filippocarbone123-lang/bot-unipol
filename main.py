@@ -89,30 +89,34 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 except Exception:
                     pass
 
-                # 4. Attesa DINAMICA del caricamento della pagina successiva (nessuna pausa fissa)
-                print("Attesa del completamento del caricamento della pagina...", flush=True)
-                # networkidle = aspetta finché non ci sono più connessioni di rete in corso
-                await page.wait_for_load_state("networkidle", timeout=45000)
-                print(f"Caricamento completato! URL attuale: {page.url}", flush=True)
+                # 4. Attesa che il browser completi il reindirizzamento da my.policy a Leonardo
+                print("In attesa che la pagina lasci il gate my.policy...", flush=True)
+                try:
+                    await page.wait_for_url(lambda u: "my.policy" not in u and "my-policy" not in u, timeout=30000)
+                except Exception:
+                    pass
 
-                # 5. Navigazione Menu Strumenti (Dinamica)
-                print("Ricerca menu Strumenti...", flush=True)
-                strumenti_btn = page.locator('text="Strumenti"').first
-                await strumenti_btn.wait_for(state="visible", timeout=35000)
-                await strumenti_btn.click()
+                await page.wait_for_load_state("domcontentloaded")
+                print(f"Atterraggio completato su: {page.url}", flush=True)
+
+                # 5. Navigazione Menu Strumenti (Selettore flessibile)
+                print("Apertura menu Strumenti...", flush=True)
+                strumenti_btn = page.locator('text=/Strumenti/i').first
+                await strumenti_btn.wait_for(state="attached", timeout=40000)
+                await strumenti_btn.click(force=True)
 
                 print("Apertura menu DANNI...", flush=True)
-                danni_btn = page.locator('text="DANNI"').first
+                danni_btn = page.locator('text=/DANNI/i').first
                 await danni_btn.wait_for(state="visible", timeout=15000)
                 await danni_btn.click()
 
                 print("Apertura menu RCA AUTO...", flush=True)
-                rca_btn = page.locator('text="RCA AUTO"').first
+                rca_btn = page.locator('text=/RCA AUTO/i').first
                 await rca_btn.wait_for(state="visible", timeout=15000)
                 await rca_btn.click()
 
                 print("Apertura CONSULTAZIONE BDA...", flush=True)
-                bda_btn = page.locator('text="CONSULTAZIONE BDA"').first
+                bda_btn = page.locator('text=/CONSULTAZIONE BDA|BDA/i').first
                 await bda_btn.wait_for(state="visible", timeout=15000)
                 await bda_btn.click()
 
@@ -140,8 +144,8 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 avanti_btn = target_frame.locator('button:has-text("Avanti"), input[value*="Avanti" i]').first
                 await avanti_btn.click()
 
-                # 7. Estrattore Dati ANIA (Attesa Dinamica)
-                print("Estrazione dinamica dati veicolo...", flush=True)
+                # 7. Estrattore Dati ANIA
+                print("Estrazione dati veicolo...", flush=True)
                 marca, modello, kw, cv, data_immat, alimentazione = "", "", "", "", "", ""
                 
                 found_data = False
@@ -162,7 +166,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         break
                     await asyncio.sleep(1)
 
-                # 8. Visualizzazione Attestato e CU (Attesa Dinamica)
+                # 8. Visualizzazione Attestato e CU
                 classe_cu = ""
                 compagnia_provenienza = ""
                 
