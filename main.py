@@ -23,6 +23,14 @@ def formatta_targa_spazi(targa_raw: str) -> str:
         return f"{clean[:2]} {clean[2:5]} {clean[5:]}"
     return clean
 
+async def click_js_sicuro(locator, timeout_ms=15000):
+    """Esegue un clic nativo JavaScript ignorando overlay e blocchi di scorrimento Playwright."""
+    await locator.wait_for(state="attached", timeout=timeout_ms)
+    try:
+        await locator.click(force=True, timeout=3000)
+    except Exception:
+        await locator.evaluate("node => node.click()")
+
 async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
     async with bot_semaphore:
         headers = {
@@ -116,28 +124,31 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 # 🔓 MODULO 1: PREVENTIVATORE UNIPOL (FASE A)
                 # ==========================================
                 print("Ingresso nel Preventivatore Unipol...", flush=True)
-                await asyncio.sleep(3)
+                await asyncio.sleep(4)
 
-                prodotti_btn = page.get_by_text("PRODOTTI", exact=True).first
-                await prodotti_btn.wait_for(state="visible", timeout=20000)
-                await prodotti_btn.click(force=True)
+                # Clic JS sicuro su PRODOTTI
+                prodotti_btn = page.locator('text="PRODOTTI", .p-button:has-text("PRODOTTI")').first
+                await click_js_sicuro(prodotti_btn)
 
-                altri_danni_btn = page.get_by_text("ALTRI PRODOTTI DANNI", exact=True).first
-                await altri_danni_btn.wait_for(state="visible", timeout=15000)
-                await altri_danni_btn.click(force=True)
+                # Selezione ALTRI PRODOTTI DANNI
+                print("Selezione ALTRI PRODOTTI DANNI...", flush=True)
+                altri_danni_btn = page.locator('text="ALTRI PRODOTTI DANNI"').first
+                await click_js_sicuro(altri_danni_btn)
 
-                conferma_btn = page.get_by_text("CONFERMA", exact=True).first
-                await conferma_btn.click(force=True)
+                conferma_btn = page.locator('button:has-text("CONFERMA"), text="CONFERMA"').first
+                await click_js_sicuro(conferma_btn)
 
-                auto_natanti_btn = page.get_by_text("AUTO/NATANTI", exact=True).first
-                await auto_natanti_btn.wait_for(state="visible", timeout=15000)
-                await auto_natanti_btn.click(force=True)
-                await conferma_btn.click(force=True)
+                # Selezione AUTO/NATANTI
+                print("Selezione AUTO/NATANTI...", flush=True)
+                auto_natanti_btn = page.locator('text="AUTO/NATANTI"').first
+                await click_js_sicuro(auto_natanti_btn)
+                await click_js_sicuro(conferma_btn)
 
-                rca_singole_btn = page.get_by_text("RCA SINGOLE", exact=True).first
-                await rca_singole_btn.wait_for(state="visible", timeout=15000)
-                await rca_singole_btn.click(force=True)
-                await conferma_btn.click(force=True)
+                # Selezione RCA SINGOLE
+                print("Selezione RCA SINGOLE...", flush=True)
+                rca_singole_btn = page.locator('text="RCA SINGOLE"').first
+                await click_js_sicuro(rca_singole_btn)
+                await click_js_sicuro(conferma_btn)
 
                 # Compilazione Targa con spazi e CIP 125
                 print("Compilazione maschera Preventivo (CIP 125 e Targa con spazi)...", flush=True)
@@ -157,7 +168,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     await cip_input.fill("125")
 
                 prosegui_btn = target_frame.locator('button:has-text("Prosegui"), input[value*="Prosegui" i], a:has-text("Prosegui")').first
-                await prosegui_btn.click()
+                await click_js_sicuro(prosegui_btn)
 
                 # Estrazione Dati Tecnici e Anagrafici dal Preventivatore
                 print("Estrazione Dati Anagrafici e Veicolo dal Preventivatore...", flush=True)
@@ -171,7 +182,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         # Dati Anagrafici
                         if await frame.locator('text=/Figure contrattuali|PROPRIETARIO/i').is_visible(timeout=1000):
                             fig_tab = frame.locator('text=/Figure contrattuali|PROPRIETARIO/i').first
-                            await fig_tab.click(force=True)
+                            await click_js_sicuro(fig_tab)
                             await page.wait_for_timeout(1000)
 
                             nome = await frame.locator('td:has-text("Nominativo") + td, input[name*="nome" i]').text_content() or ""
@@ -185,7 +196,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         # Dati Veicolo
                         if await frame.locator('text=/DATI ASSICURATIVI|Veicolo/i').is_visible(timeout=1000):
                             veic_tab = frame.locator('text=/DATI ASSICURATIVI|Veicolo/i').first
-                            await veic_tab.click(force=True)
+                            await click_js_sicuro(veic_tab)
                             await page.wait_for_timeout(1000)
 
                             marca = await frame.locator('td:has-text("Codice marca") + td, td:has-text("Marca") + td').text_content() or ""
@@ -205,14 +216,14 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await page.goto(leonardo_url, wait_until="domcontentloaded", timeout=20000)
                 await asyncio.sleep(2)
 
-                strumenti_btn = page.get_by_text("Strumenti", exact=True).first
-                danni_btn = page.get_by_text("Danni", exact=True).first
-                rca_btn = page.get_by_text("RCA AUTO", exact=True).first
-                bda_btn = page.get_by_text("CONSULTAZIONE BDA", exact=True).first
+                strumenti_btn = page.locator('text="Strumenti"').first
+                danni_btn = page.locator('text="Danni"').first
+                rca_btn = page.locator('text="RCA AUTO"').first
+                bda_btn = page.locator('text="CONSULTAZIONE BDA"').first
 
                 for _ in range(10):
                     try:
-                        await strumenti_btn.click(timeout=1500, force=True)
+                        await click_js_sicuro(strumenti_btn)
                         await danni_btn.wait_for(state="visible", timeout=2000)
                         break
                     except Exception:
@@ -220,23 +231,23 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 for _ in range(8):
                     try:
-                        await danni_btn.click(timeout=1500, force=True)
+                        await click_js_sicuro(danni_btn)
                         await rca_btn.wait_for(state="visible", timeout=2000)
                         break
                     except Exception:
-                        await strumenti_btn.click(timeout=1000, force=True)
+                        await click_js_sicuro(strumenti_btn)
                         await asyncio.sleep(1)
 
                 for _ in range(8):
                     try:
-                        await rca_btn.click(timeout=1500, force=True)
+                        await click_js_sicuro(rca_btn)
                         await bda_btn.wait_for(state="visible", timeout=2000)
                         break
                     except Exception:
-                        await danni_btn.click(timeout=1000, force=True)
+                        await click_js_sicuro(danni_btn)
                         await asyncio.sleep(1)
 
-                await bda_btn.click(timeout=3000, force=True)
+                await click_js_sicuro(bda_btn)
 
                 # Compilazione Targa in BDA (Senza spazi)
                 print(f"Inserimento targa {targa_pulita} in BDA...", flush=True)
@@ -251,7 +262,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         break
 
                 avanti_bda = target_frame_bda.locator('button:has-text("Avanti"), input[value*="Avanti" i]').first
-                await avanti_bda.click()
+                await click_js_sicuro(avanti_bda)
 
                 # Visualizzazione Attestato e CU
                 print("Estrazione Classe CU e Compagnia Provenienza da BDA...", flush=True)
@@ -262,7 +273,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 btn_att = target_frame_bda.locator('button:has-text("Visualizza Attestato"), input[value*="Attestato" i]').first
                 if await btn_att.is_visible():
-                    await btn_att.click()
+                    await click_js_sicuro(btn_att)
                     for _ in range(12):
                         for frame in page.frames:
                             cu_cell = frame.locator('td:has-text("Classe CU:")').first
