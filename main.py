@@ -102,48 +102,53 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 print(f"Atterraggio completato su: {page.url}", flush=True)
 
-                # 5. Navigazione Menu (Sistema Auto-Riparante per Angular)
-                print("Inizializzazione pagina Leonardo...", flush=True)
-                await asyncio.sleep(3)
-                
-                print("Apertura menu Strumenti...", flush=True)
-                strumenti_btn = page.locator('text=/Strumenti/i').first
-                await strumenti_btn.wait_for(state="attached", timeout=20000)
-                await strumenti_btn.click(force=True)
-
-                print("Apertura menu DANNI...", flush=True)
-                danni_btn = page.locator('text=/DANNI/i').first
-                for _ in range(4):
-                    try:
-                        await danni_btn.wait_for(state="visible", timeout=3000)
-                        break
-                    except Exception:
-                        await strumenti_btn.click(force=True)
-                await danni_btn.click(force=True)
-
-                print("Apertura menu RCA AUTO...", flush=True)
-                rca_btn = page.locator('text=/RCA AUTO/i').first
-                for _ in range(4):
-                    try:
-                        await rca_btn.wait_for(state="visible", timeout=3000)
-                        break
-                    except Exception:
-                        await danni_btn.click(force=True)
-                await rca_btn.click(force=True)
-
-                print("Apertura CONSULTAZIONE BDA...", flush=True)
-                bda_btn = page.locator('text=/CONSULTAZIONE BDA|BDA/i').first
-                for _ in range(4):
-                    try:
-                        await bda_btn.wait_for(state="visible", timeout=3000)
-                        break
-                    except Exception:
-                        await rca_btn.click(force=True)
-                await bda_btn.click(force=True)
-
                 # ==========================================
                 # 🔓 FINE ZONA IN CASSAFORTE
                 # ==========================================
+
+                # 5. Navigazione Menu (Clic Aggressivo a Verifica)
+                print("Inizializzazione pagina Leonardo...", flush=True)
+                await asyncio.sleep(3)
+                
+                strumenti_btn = page.locator('text=/Strumenti/i').first
+                danni_btn = page.locator('text=/DANNI/i').first
+                rca_btn = page.locator('text=/RCA AUTO/i').first
+                bda_btn = page.locator('text=/CONSULTAZIONE BDA|BDA/i').first
+
+                print("Apertura menu Strumenti...", flush=True)
+                for _ in range(15):
+                    try:
+                        # Clicca in modo forzato ignorando i popup trasparenti
+                        await strumenti_btn.click(timeout=1500, force=True)
+                        # Se compare DANNI, il clic ha funzionato! Interrompe il ciclo.
+                        await danni_btn.wait_for(state="visible", timeout=2500)
+                        break
+                    except Exception:
+                        await asyncio.sleep(1)
+
+                print("Apertura menu DANNI...", flush=True)
+                for _ in range(10):
+                    try:
+                        await danni_btn.click(timeout=1500, force=True)
+                        await rca_btn.wait_for(state="visible", timeout=2500)
+                        break
+                    except Exception:
+                        # Se il menu si è richiuso, riclicca Strumenti
+                        await strumenti_btn.click(timeout=1000, force=True)
+                        await asyncio.sleep(1)
+
+                print("Apertura menu RCA AUTO...", flush=True)
+                for _ in range(10):
+                    try:
+                        await rca_btn.click(timeout=1500, force=True)
+                        await bda_btn.wait_for(state="visible", timeout=2500)
+                        break
+                    except Exception:
+                        await danni_btn.click(timeout=1000, force=True)
+                        await asyncio.sleep(1)
+
+                print("Apertura CONSULTAZIONE BDA...", flush=True)
+                await bda_btn.click(timeout=3000, force=True)
 
                 # 6. Compilazione Targa nei frame
                 print(f"Inserimento targa {targa} in BDA...", flush=True)
