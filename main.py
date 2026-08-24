@@ -41,7 +41,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
             page = await context.new_page()
 
             try:
-                # PASSO 1: Credenziali di primo livello
+                # PASSO 1: Credenziali
                 print("1/3 Navigazione e inserimento User/Pass...", flush=True)
                 await page.goto("https://essig.unipolsai.it/my-policy", wait_until="domcontentloaded", timeout=30000)
                 
@@ -62,7 +62,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await page.wait_for_selector('text=/Microsoft MFA|Autenticazione/i', timeout=20000)
                 await page.locator('input[type="submit"], button').first.click()
 
-                # PASSO 3: Inserimento codice OTP Authenticator
+                # PASSO 3: Codice OTP Authenticator
                 print("3/3 Inserimento codice OTP Authenticator...", flush=True)
                 await page.wait_for_selector('text=/verification code/i', timeout=20000)
                 
@@ -74,26 +74,38 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 await page.locator('input[type="submit"], button').first.click()
 
-                # Attesa caricamento Dashboard Leonardo
-                print("Accesso al sistema in corso...", flush=True)
-                await page.wait_for_selector('text=Strumenti', timeout=25000)
+                # PASSO 4: Caricamento Dashboard Leonardo e Menu BDA ANIA
+                print("In attesa del caricamento della Dashboard Leonardo (max 50s)...", flush=True)
+                strumenti_btn = page.locator('text="Strumenti" i').first
+                await strumenti_btn.wait_for(state="visible", timeout=50000)
+                await strumenti_btn.click()
 
-                # Accesso alla sezione BDA ANIA
-                print("Accesso alla sezione BDA ANIA...", flush=True)
-                await page.click('text=Strumenti')
-                await page.click('text=DANNI')
-                await page.click('text=RCA AUTO')
-                await page.click('text=CONSULTAZIONE BDA')
+                print("Apertura menu BDA ANIA...", flush=True)
+                danni_btn = page.locator('text="DANNI" i').first
+                await danni_btn.wait_for(state="visible", timeout=10000)
+                await danni_btn.click()
 
-                # Ricerca Targa
+                rca_btn = page.locator('text="RCA AUTO" i').first
+                await rca_btn.wait_for(state="visible", timeout=10000)
+                await rca_btn.click()
+
+                bda_btn = page.locator('text="CONSULTAZIONE BDA" i').first
+                await bda_btn.wait_for(state="visible", timeout=10000)
+                await bda_btn.click()
+
+                # PASSO 5: Ricerca Targa
                 print(f"Inserimento targa {targa} in BDA...", flush=True)
                 targa_input = page.locator('input[name="targa" i], input[id*="targa" i]').first
-                await targa_input.wait_for(state="visible", timeout=15000)
+                await targa_input.wait_for(state="visible", timeout=20000)
                 await targa_input.fill(targa)
-                await page.click('button:has-text("Avanti")')
+                
+                avanti_btn = page.locator('button:has-text("Avanti"), input[type="submit"][value*="Avanti" i]').first
+                await avanti_btn.click()
 
-                # Lettura Dati Tecnici
-                await page.wait_for_selector('text=Dati veicolo', timeout=15000)
+                # PASSO 6: Lettura Dati Tecnici
+                print("Lettura scheda veicolo ANIA...", flush=True)
+                await page.wait_for_selector('text=/Dati veicolo|Carta di circolazione/i', timeout=20000)
+                
                 marca = await page.locator('td:has-text("Marca:") + td').text_content() or ""
                 modello = await page.locator('td:has-text("Descrizione modello:") + td').text_content() or ""
                 kw = await page.locator('td:has-text("KW:") + td').text_content() or ""
@@ -101,18 +113,18 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 data_immat = await page.locator('td:has-text("Data prima immatricolazione:") + td').text_content() or ""
                 alimentazione = await page.locator('td:has-text("Alimentazione:") + td').text_content() or ""
 
-                # Attestato e CU
-                btn_attestato = page.locator('button:has-text("Visualizza Attestato")')
+                # PASSO 7: Attestato di Rischio e Classe CU
+                btn_attestato = page.locator('button:has-text("Visualizza Attestato"), a:has-text("Visualizza Attestato")').first
                 classe_cu = ""
                 compagnia_provenienza = ""
 
                 if await btn_attestato.is_visible():
                     await btn_attestato.click()
-                    await page.wait_for_selector('text=Classe CU', timeout=5000)
+                    await page.wait_for_selector('text=/Classe CU|Bonus/i', timeout=8000)
                     classe_cu = await page.locator('td:has-text("Classe CU:") + td').text_content() or ""
                     compagnia_provenienza = await page.locator('td:has-text("Impresa:") + td').text_content() or ""
 
-                # Scrittura su Airtable
+                # PASSO 8: Scrittura finale su Airtable
                 print("Salvataggio dati estratti su Airtable...", flush=True)
                 payload_trattativa = {
                     "fields": {
@@ -127,8 +139,9 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         "Stato Bot Estrazione": "Dati Estratti"
                     }
                 }
-                requests.patch(url_trattativa, headers=headers, json=payload_trattativa).raise_for_status()
-                print(f"[{record_id}] Elaborazione completata con successo!", flush=True)
+                res = requests.patch(url_trattativa, headers=headers, json=payload_trattativa)
+                res.raise_for_status()
+                print(f"[{record_id}] ESTRAZIONE COMPLETATA CON SUCCESSO!", flush=True)
 
             except Exception as e:
                 err_msg = str(e)[:250]
