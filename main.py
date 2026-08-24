@@ -75,8 +75,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
                 codice_otp = totp.now()
-                print(f"Codice OTP generato: {codice_otp}", flush=True)
-
+                
                 await code_input.fill("")
                 await code_input.type(codice_otp, delay=120)
                 
@@ -90,21 +89,14 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 except Exception:
                     pass
 
-                # 4. Attesa della pagina di sessione (my.policy)
-                print("In attesa di conferma sessione (my.policy)...", flush=True)
-                await page.wait_for_url(lambda u: "my.policy" in u or "WorkspaceWeb" in u, timeout=30000)
-                print(f"Sessione Autenticata! URL attuale: {page.url}", flush=True)
+                # 4. Attesa DINAMICA del caricamento della pagina successiva (nessuna pausa fissa)
+                print("Attesa del completamento del caricamento della pagina...", flush=True)
+                # networkidle = aspetta finché non ci sono più connessioni di rete in corso
+                await page.wait_for_load_state("networkidle", timeout=45000)
+                print(f"Caricamento completato! URL attuale: {page.url}", flush=True)
 
-                # 5. Ingresso Diretto in Leonardo Workspace (Ora che i cookie sono attivi)
-                print("Apertura Leonardo Workspace...", flush=True)
-                await page.goto(
-                    "https://essig.unipolsai.it/WorkspaceWeb/app/configuratore_questionari/questionario",
-                    wait_until="domcontentloaded",
-                    timeout=30000
-                )
-
-                # 6. Navigazione Menu Strumenti
-                print("In attesa del menu Strumenti...", flush=True)
+                # 5. Navigazione Menu Strumenti (Dinamica)
+                print("Ricerca menu Strumenti...", flush=True)
                 strumenti_btn = page.locator('text="Strumenti"').first
                 await strumenti_btn.wait_for(state="visible", timeout=35000)
                 await strumenti_btn.click()
@@ -124,7 +116,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await bda_btn.wait_for(state="visible", timeout=15000)
                 await bda_btn.click()
 
-                # 7. Compilazione Targa nei frame
+                # 6. Compilazione Targa nei frame
                 print(f"Inserimento targa {targa} in BDA...", flush=True)
                 targa_input = None
                 target_frame = page.main_frame
@@ -148,8 +140,8 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 avanti_btn = target_frame.locator('button:has-text("Avanti"), input[value*="Avanti" i]').first
                 await avanti_btn.click()
 
-                # 8. Estrattore Dati ANIA
-                print("Estrazione dati veicolo...", flush=True)
+                # 7. Estrattore Dati ANIA (Attesa Dinamica)
+                print("Estrazione dinamica dati veicolo...", flush=True)
                 marca, modello, kw, cv, data_immat, alimentazione = "", "", "", "", "", ""
                 
                 found_data = False
@@ -170,14 +162,14 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         break
                     await asyncio.sleep(1)
 
-                # 9. Visualizzazione Attestato e CU
+                # 8. Visualizzazione Attestato e CU (Attesa Dinamica)
                 classe_cu = ""
                 compagnia_provenienza = ""
                 
                 btn_att = target_frame.locator('button:has-text("Visualizza Attestato"), input[value*="Attestato" i]').first
                 if await btn_att.is_visible():
                     await btn_att.click()
-                    for _ in range(12):
+                    for _ in range(15):
                         for frame in page.frames:
                             cu_cell = frame.locator('td:has-text("Classe CU:")').first
                             if await cu_cell.is_visible():
@@ -188,7 +180,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                             break
                         await asyncio.sleep(1)
 
-                # 10. Scrittura finale su Airtable
+                # 9. Scrittura finale su Airtable
                 print("Salvataggio dati estratti su Airtable...", flush=True)
                 payload_trattativa = {
                     "fields": {
@@ -199,7 +191,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         "Data Immatricolazione": data_immat.strip(),
                         "Alimentazione": alimentazione.strip(),
                         "Classe CU": classe_cu.strip(),
-                        "Compagnia Provenienza": provincia if (provincia := compagnia_provenienza.strip()) else "",
+                        "Compagnia Provenienza": compagnia_provenienza.strip(),
                         "Stato Bot Estrazione": "Dati Estratti"
                     }
                 }
