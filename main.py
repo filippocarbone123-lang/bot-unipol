@@ -42,6 +42,10 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
             page = await context.new_page()
 
             try:
+                # ==========================================
+                # 🔒 INIZIO ZONA IN CASSAFORTE (NON TOCCARE)
+                # ==========================================
+                
                 # 1. Accesso Credenziali Primo Livello
                 print("1/3 Inserimento Username e Password...", flush=True)
                 await page.goto("https://essig.unipolsai.it/my-policy", wait_until="domcontentloaded", timeout=40000)
@@ -82,25 +86,26 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 print("Clic su pulsante Login OTP...", flush=True)
                 await page.locator('input[type="submit"], button').first.click()
                 
-                # Pausa per far elaborare l'OTP ai server Microsoft/Unipol e salvare i cookie
                 print("Attesa 6s per registrazione sessione di sicurezza...", flush=True)
                 await asyncio.sleep(6)
 
-                # 4. TRUCCO UTENTE: Navigazione forzata a Leonardo
+                # 4. Navigazione forzata a Leonardo
                 print("Forzatura URL Leonardo (bypass caricamenti lenti)...", flush=True)
                 leonardo_url = "https://essig.unipolsai.it/WorkspaceWeb/app/configuratore_questionari/questionario"
                 
                 try:
                     await page.goto(leonardo_url, wait_until="domcontentloaded", timeout=15000)
                 except Exception as e:
-                    # Se il redirect del server Unipol interrompe la nostra navigazione, riproviamo!
                     print(f"Interferenza di sistema ({e}), riprovo la forzatura...", flush=True)
                     await asyncio.sleep(2)
                     await page.goto(leonardo_url, wait_until="domcontentloaded", timeout=20000)
 
                 print(f"Atterraggio completato su: {page.url}", flush=True)
 
-                # 5. Navigazione Menu Strumenti
+                # 5. Navigazione Menu (Sistema Auto-Riparante per Angular)
+                print("Inizializzazione pagina Leonardo...", flush=True)
+                await asyncio.sleep(3)
+                
                 print("Apertura menu Strumenti...", flush=True)
                 strumenti_btn = page.locator('text=/Strumenti/i').first
                 await strumenti_btn.wait_for(state="attached", timeout=20000)
@@ -108,18 +113,37 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 print("Apertura menu DANNI...", flush=True)
                 danni_btn = page.locator('text=/DANNI/i').first
-                await danni_btn.wait_for(state="visible", timeout=15000)
-                await danni_btn.click()
+                for _ in range(4):
+                    try:
+                        await danni_btn.wait_for(state="visible", timeout=3000)
+                        break
+                    except Exception:
+                        await strumenti_btn.click(force=True)
+                await danni_btn.click(force=True)
 
                 print("Apertura menu RCA AUTO...", flush=True)
                 rca_btn = page.locator('text=/RCA AUTO/i').first
-                await rca_btn.wait_for(state="visible", timeout=15000)
-                await rca_btn.click()
+                for _ in range(4):
+                    try:
+                        await rca_btn.wait_for(state="visible", timeout=3000)
+                        break
+                    except Exception:
+                        await danni_btn.click(force=True)
+                await rca_btn.click(force=True)
 
                 print("Apertura CONSULTAZIONE BDA...", flush=True)
                 bda_btn = page.locator('text=/CONSULTAZIONE BDA|BDA/i').first
-                await bda_btn.wait_for(state="visible", timeout=15000)
-                await bda_btn.click()
+                for _ in range(4):
+                    try:
+                        await bda_btn.wait_for(state="visible", timeout=3000)
+                        break
+                    except Exception:
+                        await rca_btn.click(force=True)
+                await bda_btn.click(force=True)
+
+                # ==========================================
+                # 🔓 FINE ZONA IN CASSAFORTE
+                # ==========================================
 
                 # 6. Compilazione Targa nei frame
                 print(f"Inserimento targa {targa} in BDA...", flush=True)
