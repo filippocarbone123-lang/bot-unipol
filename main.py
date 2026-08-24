@@ -1,12 +1,13 @@
 import os
 import pyotp
 import requests
-import traceback
+import asyncio
 from datetime import datetime
 from fastapi import FastAPI, BackgroundTasks
 from playwright.async_api import async_playwright
 
 app = FastAPI()
+bot_semaphore = asyncio.Semaphore(1)
 
 UNIPOL_USER = os.getenv("UNIPOL_USER")
 UNIPOL_PASS = os.getenv("UNIPOL_PASS")
@@ -14,106 +15,102 @@ UNIPOL_TOTP_SECRET = os.getenv("UNIPOL_TOTP_SECRET")
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 
-async def estrai_dati_unipol(record_id: str, targa: str, data_nascita: str):
-    headers = {
-        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    url_quotazioni = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Quotazioni_Preventivi"
-    url_trattativa = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Trattative/{record_id}"
+async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
+    async with bot_semaphore:
+        headers = {
+            "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        url_trattativa = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Trattative/{record_id}"
 
-    # Genera codice 2FA instantaneo
-    totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
-    code_2fa = totp.now()
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
-        page = await context.new_page()
-
-        try:
-            # 1. Login e Autenticazione 2FA su Portale Unipol
-            await page.goto("https://www.unipol.it") # Sostituire con URL login portale intermediari
-            await page.fill('input[name="Username"]', UNIPOL_USER or "")
-            await page.fill('input[name="Password"]', UNIPOL_PASS or "")
-            await page.click('button[type="submit"]')
-
-            await page.fill('input[name="code"]', code_2fa)
-            await page.click('button[type="submit"]')
-
-            # 2. Inserimento Targa e Data di Nascita
-            # (Lo script compila i campi targa e data_nascita sul portale)
-
-            # --- ESEMPIO DATI ESTRATTI DAL PORTAL UNIPOL ---
-            # Sostituire con i selettori di estrazione effettivi
-            stato_quotazione = "Calcolato"
-            num_preventivo = "UNIP-2026-98765"
-            premio_annuo = 450.00
-            premio_semestrale = 235.00
-            premio_rca = 380.00
-            imposte = 70.00
-            marca = "FIAT"
-            modello = "Panda"
-            allestimento = "1.0 Hybrid Lounge"
-            alimentazione = "Ibrida"
-            kw = 51
-            cv = 70
-            valore_veicolo = 12500
-
-            # 3. Inserimento Nuova Riga su Quotazioni_Preventivi
-            payload_preventivo = {
-                "fields": {
-                    "Trattativa": [record_id],
-                    "Compagnia": "Unipol",
-                    "Stato Quotazione": stato_quotazione,
-                    "Numero Preventivo": num_preventivo,
-                    "Premio Annuo": premio_annuo,
-                    "Premio Semestrale": premio_semestrale,
-                    "Premio Lordo RCA": premio_rca,
-                    "Imposte e Diritti": imposte,
-                    "Marca": marca,
-                    "Modello": modello,
-                    "Allestimento": allestimento,
-                    "Tipo di Alimentazione": alimentazione,
-                    "KW": kw,
-                    "CV": cv,
-                    "Valore Veicolo": valore_veicolo,
-                    "Data Ora Calcolo": datetime.now().isoformat()
-                }
-            }
-            res = requests.post(url_quotazioni, headers=headers, json=payload_preventivo)
-            res.raise_for_status()
-
-            # 4. Aggiorna lo Stato della Trattativa Madre
-            requests.patch(
-                url_trattativa,
-                headers=headers,
-                json={"fields": {"Stato Bot Estrazione": "Dati Estratti"}}
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--single-process"
+                ]
             )
+            context = await browser.new_context()
+            page = await context.new_page()
 
-        except Exception as e:
-            errore_msg = str(e)
-            print(f"Errore Bot Unipol: {errore_msg}")
-            
-            # Crea riga preventivo con Errore
-            payload_errore = {
-                "fields": {
-                    "Trattativa": [record_id],
-                    "Compagnia": "Unipol",
-                    "Stato Quotazione": "Non Quotabile",
-                    "Note e Errori Bot": errore_msg[:500]
+            try:
+                # 1. Accesso Portale Agenti Unipol
+                await page.goto("https://essig.unipolsai.it/my-policy")
+                await page.fill('input[name="Username"]', UNIPOL_USER or "")
+                await page.fill('input[name="Password"]', UNIPOL_PASS or "")
+                await page.select_option('select[name="Domain"]', value="Unisage")
+                await page.click('button:has-text("Login")')
+
+                # 2. Inserimento OTP 2FA
+                totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
+                await page.fill('input[name="code"]', totp.now())
+                await page.click('button:has-text("Login")')
+                await page.wait_for_selector('text=Strumenti', timeout=15000)
+
+                # 3. Navigazione a Consultazione BDA ANIA
+                await page.click('text=Strumenti')
+                await page.click('text=DANNI')
+                await page.click('text=RCA AUTO')
+                await page.click('text=CONSULTAZIONE BDA')
+
+                # 4. Ricerca Targa
+                await page.wait_for_selector('input[name="targa"]')
+                await page.fill('input[name="targa"]', targa)
+                await page.click('button:has-text("Avanti")')
+
+                # 5. Estrazione Dati Tecnici Generali da BDA
+                await page.wait_for_selector('text=Dati veicolo', timeout=10000)
+
+                marca = await page.locator('td:has-text("Marca:") + td').text_content() or ""
+                modello = await page.locator('td:has-text("Descrizione modello:") + td').text_content() or ""
+                kw = await page.locator('td:has-text("KW:") + td').text_content() or ""
+                cv = await page.locator('td:has-text("Cilindrata:") + td').text_content() or ""
+                data_immat = await page.locator('td:has-text("Data prima immatricolazione:") + td').text_content() or ""
+                alimentazione = await page.locator('td:has-text("Alimentazione:") + td').text_content() or ""
+
+                # 6. Lettura Attestato di Rischio e Classe CU
+                btn_attestato = page.locator('button:has-text("Visualizza Attestato")')
+                classe_cu = ""
+                compagnia_provenienza = ""
+
+                if await btn_attestato.is_visible():
+                    await btn_attestato.click()
+                    await page.wait_for_selector('text=Classe CU', timeout=5000)
+                    classe_cu = await page.locator('td:has-text("Classe CU:") + td').text_content() or ""
+                    compagnia_provenienza = await page.locator('td:has-text("Impresa:") + td').text_content() or ""
+
+                # 7. Mappatura e Aggiornamento Trattativa su Airtable
+                payload_trattativa = {
+                    "fields": {
+                        "Marca": marca.strip(),
+                        "Modello": modello.strip(),
+                        "KW": kw.strip(),
+                        "CV": cv.strip(),
+                        "Data Immatricolazione": data_immat.strip(),
+                        "Alimentazione": alimentazione.strip(),
+                        "Classe CU": classe_cu.strip(),
+                        "Compagnia Provenienza": compagnia_provenienza.strip(),
+                        "Stato Bot Estrazione": "Dati Estratti"
+                    }
                 }
-            }
-            requests.post(url_quotazioni, headers=headers, json=payload_errore)
+                
+                res = requests.patch(url_trattativa, headers=headers, json=payload_trattativa)
+                res.raise_for_status()
 
-            # Segnala errore sulla Trattativa
-            requests.patch(
-                url_trattativa,
-                headers=headers,
-                json={"fields": {"Stato Bot Estrazione": "Errore"}}
-            )
-        finally:
-            await browser.close()
+            except Exception as e:
+                print(f"Errore durante l'estrazione BDA: {str(e)}")
+                requests.patch(
+                    url_trattativa,
+                    headers=headers,
+                    json={"fields": {"Stato Bot Estrazione": "Errore"}}
+                )
+
+            finally:
+                await context.close()
+                await browser.close()
 
 @app.post("/estrai")
 async def trigger_bot(data: dict, background_tasks: BackgroundTasks):
@@ -121,5 +118,5 @@ async def trigger_bot(data: dict, background_tasks: BackgroundTasks):
     targa = data.get("targa")
     data_nascita = data.get("data_nascita")
     
-    background_tasks.add_task(estrai_dati_unipol, record_id, targa, data_nascita)
-    return {"status": "Bot avviato", "record_id": record_id}
+    background_tasks.add_task(estrai_dati_bda, record_id, targa, data_nascita)
+    return {"status": "Estrazione BDA avviata", "record_id": record_id}
