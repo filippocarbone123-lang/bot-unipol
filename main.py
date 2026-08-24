@@ -41,7 +41,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
             page = await context.new_page()
 
             try:
-                # PASSO 1: Credenziali
+                # PASSO 1: Credenziali di primo livello
                 print("1/3 Navigazione e inserimento User/Pass...", flush=True)
                 await page.goto("https://essig.unipolsai.it/my-policy", wait_until="domcontentloaded", timeout=30000)
                 
@@ -72,16 +72,23 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
                 await code_input.fill(totp.now())
 
-                # Invio form OTP tramite tasto Invio
-                print("Invio OTP e attesa reindirizzamento Leonardo...", flush=True)
-                await code_input.press("Enter")
-                await page.wait_for_timeout(5000)
-                print(f"URL corrente dopo OTP: {page.url}", flush=True)
+                # Clic su Login per salvare la sessione
+                await page.locator('input[type="submit"], button').first.click()
+                
+                # Pausa tecnica per la registrazione dei cookie di sessione
+                await page.wait_for_timeout(2500)
 
-                # PASSO 4: Caricamento Dashboard Leonardo e Menu BDA ANIA
-                print("In attesa del menu Strumenti...", flush=True)
+                # PASSO 4: FORZATURA NAVIGAZIONE DIRETTA (Bypass dei caricamenti home)
+                print("Forzatura navigazione diretta a Leonardo Workspace...", flush=True)
+                await page.goto(
+                    "https://essig.unipolsai.it/WorkspaceWeb/app/configuratore_questionari/questionario",
+                    wait_until="domcontentloaded",
+                    timeout=30000
+                )
+
+                print("Apertura menu Strumenti su Leonardo...", flush=True)
                 strumenti_btn = page.locator('text="Strumenti" i, button:has-text("Strumenti")').first
-                await strumenti_btn.wait_for(state="visible", timeout=60000)
+                await strumenti_btn.wait_for(state="visible", timeout=30000)
                 await strumenti_btn.click()
 
                 print("Apertura menu BDA ANIA...", flush=True)
@@ -150,7 +157,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
             except Exception as e:
                 err_msg = str(e)[:250]
                 print(f"[{record_id}] ERRORE: {err_msg}", flush=True)
-                print(f"URL al momento dell'errore: {page.url}", flush=True)
                 requests.patch(
                     url_trattativa,
                     headers=headers,
