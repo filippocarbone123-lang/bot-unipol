@@ -2,7 +2,6 @@ import os
 import pyotp
 import requests
 import asyncio
-from datetime import datetime
 from fastapi import FastAPI, BackgroundTasks
 from playwright.async_api import async_playwright
 
@@ -41,12 +40,16 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
             page = await context.new_page()
 
             try:
-                # 1. Credenziali User/Pass
+                # 1. Credenziali
                 print("1/3 Navigazione e inserimento User/Pass...", flush=True)
-                await page.goto("https://essig.unipolsai.it/my-policy", wait_until="domcontentloaded", timeout=30000)
+                await page.goto("https://essig.unipolsai.it/my-policy", wait_until="domcontentloaded", timeout=40000)
                 
-                await page.locator('input[name="Username" i], input[name="username" i]').first.fill(UNIPOL_USER or "")
-                await page.locator('input[type="password"]').first.fill(UNIPOL_PASS or "")
+                user_input = page.locator('input[name="Username" i], input[name="username" i]').first
+                await user_input.wait_for(state="visible", timeout=20000)
+                await user_input.fill(UNIPOL_USER or "")
+
+                pass_input = page.locator('input[type="password"]').first
+                await pass_input.fill(UNIPOL_PASS or "")
 
                 domain_select = page.locator('select[name="domain" i]').first
                 if await domain_select.is_visible():
@@ -57,66 +60,110 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 await page.locator('input[type="submit"], button').first.click()
 
-                # 2. Schermata intermedia MFA
-                print("2/3 Conferma schermata intermedia Microsoft MFA...", flush=True)
-                await page.wait_for_selector('text=/Microsoft MFA|Autenticazione/i', timeout=20000)
-                await page.locator('input[type="submit"], button').first.click()
+                # 2. MFA Microsoft Intermedio
+                print("2/3 Schermata intermedia MFA...", flush=True)
+                login_mfa_btn = page.locator('input[type="submit"], button').first
+                await login_mfa_btn.wait_for(state="visible", timeout=25000)
+                await login_mfa_btn.click()
 
-                # 3. Inserimento OTP Authenticator
-                print("3/3 Inserimento codice OTP Authenticator...", flush=True)
-                await page.wait_for_selector('text=/verification code/i', timeout=20000)
-                
+                # 3. OTP Authenticator
+                print("3/3 Inserimento OTP Authenticator...", flush=True)
                 code_input = page.locator('input[type="text"], input[type="number"], input').first
-                await code_input.wait_for(state="visible", timeout=10000)
+                await code_input.wait_for(state="visible", timeout=25000)
 
                 totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
                 await code_input.fill(totp.now())
 
-                print("Invio OTP e stabilizzazione sessione...", flush=True)
-                await page.locator('input[type="submit"], button').first.click()
+                submit_otp = page.locator('input[type="submit"], button').first
+                await submit_otp.click()
+
+                # 4. Attesa dinamica comparsa Dashboard Leonardo
+                print("In attesa che il menu Strumenti sia visibile...", flush=True)
+                strumenti_btn = page.locator('text="Strumenti" i, button:has-text("Strumenti"), a:has-text("Strumenti")').first
+                await strumenti_btn.wait_for(state="visible", timeout=60000)
+                await strumenti_btn.click()
+
+                print("Apertura dinamica menu DANNI...", flush=True)
+                danni_btn = page.locator('text="DANNI" i').first
+                await danni_btn.wait_for(state="visible", timeout=20000)
+                await danni_btn.click()
+
+                print("Apertura dinamica menu RCA AUTO...", flush=True)
+                rca_btn = page.locator('text="RCA AUTO" i').first
+                await rca_btn.wait_for(state="visible", timeout=20000)
+                await rca_btn.click()
+
+                print("Apertura dinamica CONSULTAZIONE BDA...", flush=True)
+                bda_btn = page.locator('text="CONSULTAZIONE BDA" i').first
+                await bda_btn.wait_for(state="visible", timeout=20000)
+                await bda_btn.click()
+
+                # 5. Attesa reattiva mascherina Targa nei frame
+                print(f"In attesa del campo Targa per {targa}...", flush=True)
+                targa_input = None
+                target_frame = page.main_frame
                 
-                # Attesa del completamento dell'autenticazione per salvare i cookie di sessione
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=15000)
-                except Exception:
-                    await page.wait_for_timeout(4000)
+                # Polling attivo di max 20 secondi
+                for _ in range(20):
+                    for frame in page.frames:
+                        inp = frame.locator('input[name*="targa" i], input[id*="targa" i]').first
+                        if await inp.is_visible():
+                            targa_input = inp
+                            target_frame = frame
+                            break
+                    if targa_input:
+                        break
+                    await asyncio.sleep(1)
 
-                # 4. Navigazione DIRETTA all'URL BDA ANIA
-                print("Navigazione diretta alla pagina BDA ANIA (DanniWeb/FA)...", flush=True)
-                await page.goto("https://essig.unipolsai.it/DanniWeb/FA/start.do", wait_until="domcontentloaded", timeout=30000)
+                if not targa_input:
+                    targa_input = page.locator('input[name*="targa" i], input[id*="targa" i]').first
+                    await targa_input.wait_for(state="visible", timeout=20000)
 
-                # 5. Inserimento Targa in BDA
-                print(f"Inserimento targa {targa} in BDA...", flush=True)
-                targa_input = page.locator('input[name="targa" i], input[id*="targa" i], input[type="text"]').first
-                await targa_input.wait_for(state="visible", timeout=20000)
                 await targa_input.fill(targa)
-                
-                avanti_btn = page.locator('button:has-text("Avanti"), input[type="submit"][value*="Avanti" i], input[value*="Avanti" i]').first
+                avanti_btn = target_frame.locator('button:has-text("Avanti"), input[value*="Avanti" i]').first
                 await avanti_btn.click()
 
-                # 6. Lettura Dati Tecnici ANIA
-                print("Lettura scheda veicolo ANIA...", flush=True)
-                await page.wait_for_selector('text=/Dati veicolo|Carta di circolazione/i', timeout=20000)
+                # 6. Lettura reattiva dati veicolo
+                print("In attesa della scheda veicolo ANIA...", flush=True)
+                marca, modello, kw, cv, data_immat, alimentazione = "", "", "", "", "", ""
                 
-                marca = await page.locator('td:has-text("Marca:") + td').text_content() or ""
-                modello = await page.locator('td:has-text("Descrizione modello:") + td').text_content() or ""
-                kw = await page.locator('td:has-text("KW:") + td').text_content() or ""
-                cv = await page.locator('td:has-text("Cilindrata:") + td').text_content() or ""
-                data_immat = await page.locator('td:has-text("Data prima immatricolazione:") + td').text_content() or ""
-                alimentazione = await page.locator('td:has-text("Alimentazione:") + td').text_content() or ""
+                found_data = False
+                for _ in range(25):
+                    for frame in page.frames:
+                        cell = frame.locator('td:has-text("Marca:")').first
+                        if await cell.is_visible():
+                            marca = await frame.locator('td:has-text("Marca:") + td').text_content() or ""
+                            modello = await frame.locator('td:has-text("Descrizione modello:") + td').text_content() or ""
+                            kw = await frame.locator('td:has-text("KW:") + td').text_content() or ""
+                            cv = await frame.locator('td:has-text("Cilindrata:") + td').text_content() or ""
+                            data_immat = await frame.locator('td:has-text("Data prima immatricolazione:") + td').text_content() or ""
+                            alimentazione = await frame.locator('td:has-text("Alimentazione:") + td').text_content() or ""
+                            target_frame = frame
+                            found_data = True
+                            break
+                    if found_data:
+                        break
+                    await asyncio.sleep(1)
 
-                # 7. Attestato di Rischio e Classe CU
-                btn_attestato = page.locator('button:has-text("Visualizza Attestato"), a:has-text("Visualizza Attestato"), input[value*="Attestato" i]').first
+                # 7. Attestato e CU
                 classe_cu = ""
                 compagnia_provenienza = ""
+                
+                btn_att = target_frame.locator('button:has-text("Visualizza Attestato"), input[value*="Attestato" i]').first
+                if await btn_att.is_visible():
+                    await btn_att.click()
+                    for _ in range(12):
+                        for frame in page.frames:
+                            cu_cell = frame.locator('td:has-text("Classe CU:")').first
+                            if await cu_cell.is_visible():
+                                classe_cu = await frame.locator('td:has-text("Classe CU:") + td').text_content() or ""
+                                compagnia_provenienza = await frame.locator('td:has-text("Impresa:") + td').text_content() or ""
+                                break
+                        if classe_cu:
+                            break
+                        await asyncio.sleep(1)
 
-                if await btn_attestato.is_visible():
-                    await btn_attestato.click()
-                    await page.wait_for_selector('text=/Classe CU|Bonus/i', timeout=8000)
-                    classe_cu = await page.locator('td:has-text("Classe CU:") + td').text_content() or ""
-                    compagnia_provenienza = await page.locator('td:has-text("Impresa:") + td').text_content() or ""
-
-                # 8. Scrittura finale su Airtable
+                # 8. Salvataggio Airtable
                 print("Salvataggio dati estratti su Airtable...", flush=True)
                 payload_trattativa = {
                     "fields": {
@@ -138,7 +185,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
             except Exception as e:
                 err_msg = str(e)[:250]
                 print(f"[{record_id}] ERRORE: {err_msg}", flush=True)
-                print(f"URL al momento dell'errore: {page.url}", flush=True)
                 requests.patch(
                     url_trattativa,
                     headers=headers,
