@@ -69,7 +69,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await login_mfa_btn.click()
 
                 # 3. Digitazione e Invio OTP Authenticator
-                print("3/3 Inserimento codice OTP Authenticator...", flush=True)
+                print("3/3 Inserimento codice OTP...", flush=True)
                 code_input = page.locator('input[type="text"], input[type="number"], input').first
                 await code_input.wait_for(state="visible", timeout=25000)
 
@@ -77,32 +77,33 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 codice_otp = totp.now()
                 
                 await code_input.fill("")
-                await code_input.type(codice_otp, delay=120)
+                await code_input.type(codice_otp, delay=100)
                 
-                print("Invio form OTP...", flush=True)
-                await page.keyboard.press("Enter")
+                print("Clic su pulsante Login OTP...", flush=True)
+                await page.locator('input[type="submit"], button').first.click()
+                
+                # Pausa per far elaborare l'OTP ai server Microsoft/Unipol e salvare i cookie
+                print("Attesa 6s per registrazione sessione di sicurezza...", flush=True)
+                await asyncio.sleep(6)
+
+                # 4. TRUCCO UTENTE: Navigazione forzata a Leonardo
+                print("Forzatura URL Leonardo (bypass caricamenti lenti)...", flush=True)
+                leonardo_url = "https://essig.unipolsai.it/WorkspaceWeb/app/configuratore_questionari/questionario"
                 
                 try:
-                    login_otp_btn = page.locator('input[type="submit"], button:has-text("Login")').first
-                    if await login_otp_btn.is_visible(timeout=2000):
-                        await login_otp_btn.click()
-                except Exception:
-                    pass
+                    await page.goto(leonardo_url, wait_until="domcontentloaded", timeout=15000)
+                except Exception as e:
+                    # Se il redirect del server Unipol interrompe la nostra navigazione, riproviamo!
+                    print(f"Interferenza di sistema ({e}), riprovo la forzatura...", flush=True)
+                    await asyncio.sleep(2)
+                    await page.goto(leonardo_url, wait_until="domcontentloaded", timeout=20000)
 
-                # 4. Attesa che il browser completi il reindirizzamento da my.policy a Leonardo
-                print("In attesa che la pagina lasci il gate my.policy...", flush=True)
-                try:
-                    await page.wait_for_url(lambda u: "my.policy" not in u and "my-policy" not in u, timeout=30000)
-                except Exception:
-                    pass
-
-                await page.wait_for_load_state("domcontentloaded")
                 print(f"Atterraggio completato su: {page.url}", flush=True)
 
-                # 5. Navigazione Menu Strumenti (Selettore flessibile)
+                # 5. Navigazione Menu Strumenti
                 print("Apertura menu Strumenti...", flush=True)
                 strumenti_btn = page.locator('text=/Strumenti/i').first
-                await strumenti_btn.wait_for(state="attached", timeout=40000)
+                await strumenti_btn.wait_for(state="attached", timeout=20000)
                 await strumenti_btn.click(force=True)
 
                 print("Apertura menu DANNI...", flush=True)
