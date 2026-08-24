@@ -41,62 +41,56 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
             page = await context.new_page()
 
             try:
-                # 1. Accesso Unipol
-                print("Navigazione a essig.unipolsai.it...", flush=True)
+                # PASSO 1: Credenziali di primo livello
+                print("1/3 Navigazione e inserimento User/Pass...", flush=True)
                 await page.goto("https://essig.unipolsai.it/my-policy", wait_until="domcontentloaded", timeout=30000)
                 
-                user_input = page.locator('input[name="Username" i], input[name="username" i], input[id*="user" i]').first
-                await user_input.wait_for(state="visible", timeout=20000)
-                await user_input.fill(UNIPOL_USER or "")
+                await page.locator('input[name="Username" i], input[name="username" i]').first.fill(UNIPOL_USER or "")
+                await page.locator('input[type="password"]').first.fill(UNIPOL_PASS or "")
 
-                pass_input = page.locator('input[type="password"]').first
-                await pass_input.fill(UNIPOL_PASS or "")
-
-                # Seleziona il dominio "Uniage" corretto
-                domain_select = page.locator('select[name="domain" i], select[id*="domain" i]').first
+                domain_select = page.locator('select[name="domain" i]').first
                 if await domain_select.is_visible():
                     try:
                         await domain_select.select_option(label="Uniage", timeout=3000)
                     except Exception:
-                        try:
-                            await domain_select.select_option(value="Uniage", timeout=3000)
-                        except Exception:
-                            try:
-                                await domain_select.select_option(value="UNIAGE", timeout=3000)
-                            except Exception:
-                                pass
+                        await domain_select.select_option(value="Uniage", timeout=3000)
 
-                login_btn = page.locator('button:has-text("Login"), input[type="submit"][value*="Login" i], button[type="submit"]').first
-                await login_btn.click()
+                await page.locator('input[type="submit"], button').first.click()
 
-                # 2. Inserimento OTP 2FA
-                print("Inserimento codice OTP...", flush=True)
-                code_input = page.locator('input[name="code" i], input[id*="code" i], input[type="number"]').first
+                # PASSO 2: Schermata intermedia Microsoft MFA
+                print("2/3 Conferma schermata intermedia Microsoft MFA...", flush=True)
+                login_mfa_btn = page.locator('input[type="submit"], button').first
+                await login_mfa_btn.wait_for(state="visible", timeout=20000)
+                await login_mfa_btn.click()
+
+                # PASSO 3: Inserimento codice OTP (Microsoft verification code)
+                print("3/3 Inserimento codice OTP Authenticator...", flush=True)
+                code_input = page.locator('input[type="text"], input[type="number"]').first
                 await code_input.wait_for(state="visible", timeout=20000)
 
                 totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
                 await code_input.fill(totp.now())
-                
-                login_btn_2fa = page.locator('button:has-text("Login"), input[type="submit"]').first
-                await login_btn_2fa.click()
-                
-                await page.wait_for_selector('text=Strumenti', timeout=20000)
 
-                # 3. Navigazione BDA ANIA
+                await page.locator('input[type="submit"], button').first.click()
+
+                # Attesa caricamento Dashboard Leonardo
+                await page.wait_for_selector('text=Strumenti', timeout=25000)
+
+                # Accesso alla sezione BDA ANIA
                 print("Accesso alla sezione BDA ANIA...", flush=True)
                 await page.click('text=Strumenti')
                 await page.click('text=DANNI')
                 await page.click('text=RCA AUTO')
                 await page.click('text=CONSULTAZIONE BDA')
 
-                # 4. Ricerca Targa
+                # Ricerca Targa
                 print(f"Inserimento targa {targa} in BDA...", flush=True)
                 targa_input = page.locator('input[name="targa" i], input[id*="targa" i]').first
                 await targa_input.wait_for(state="visible", timeout=15000)
                 await targa_input.fill(targa)
                 await page.click('button:has-text("Avanti")')
 
-                # 5. Lettura Dati Tecnici
+                # Lettura Dati Tecnici
                 await page.wait_for_selector('text=Dati veicolo', timeout=15000)
                 marca = await page.locator('td:has-text("Marca:") + td').text_content() or ""
                 modello = await page.locator('td:has-text("Descrizione modello:") + td').text_content() or ""
@@ -105,7 +99,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 data_immat = await page.locator('td:has-text("Data prima immatricolazione:") + td').text_content() or ""
                 alimentazione = await page.locator('td:has-text("Alimentazione:") + td').text_content() or ""
 
-                # 6. Attestato e CU
+                # Attestato e CU
                 btn_attestato = page.locator('button:has-text("Visualizza Attestato")')
                 classe_cu = ""
                 compagnia_provenienza = ""
@@ -116,7 +110,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     classe_cu = await page.locator('td:has-text("Classe CU:") + td').text_content() or ""
                     compagnia_provenienza = await page.locator('td:has-text("Impresa:") + td').text_content() or ""
 
-                # 7. Aggiornamento Airtable
+                # Scrittura su Airtable
                 print("Salvataggio dati estratti su Airtable...", flush=True)
                 payload_trattativa = {
                     "fields": {
