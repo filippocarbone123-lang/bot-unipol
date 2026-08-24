@@ -23,47 +23,53 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
         }
         url_trattativa = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Trattative/{record_id}"
 
+        # 1. Imposta subito lo stato su Airtable come "In Corso"
+        print(f"[{record_id}] Avvio elaborazione per targa: {targa}", flush=True)
+        requests.patch(
+            url_trattativa,
+            headers=headers,
+            json={"fields": {"Stato Bot Estrazione": "In Corso"}}
+        )
+
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--single-process"
-                ]
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
             )
             context = await browser.new_context()
             page = await context.new_page()
 
             try:
-                # 1. Accesso Portale Agenti Unipol
+                # 2. Accesso Unipol
+                print("Navigazione a essig.unipolsai.it...", flush=True)
                 await page.goto("https://essig.unipolsai.it/my-policy")
                 await page.fill('input[name="Username"]', UNIPOL_USER or "")
                 await page.fill('input[name="Password"]', UNIPOL_PASS or "")
                 await page.select_option('select[name="Domain"]', value="Unisage")
                 await page.click('button:has-text("Login")')
 
-                # 2. Inserimento OTP 2FA
+                # 3. OTP 2FA
+                print("Inserimento codice OTP...", flush=True)
                 totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
                 await page.fill('input[name="code"]', totp.now())
                 await page.click('button:has-text("Login")')
                 await page.wait_for_selector('text=Strumenti', timeout=15000)
 
-                # 3. Navigazione a Consultazione BDA ANIA
+                # 4. Navigazione BDA
+                print("Accesso alla sezione BDA ANIA...", flush=True)
                 await page.click('text=Strumenti')
                 await page.click('text=DANNI')
                 await page.click('text=RCA AUTO')
                 await page.click('text=CONSULTAZIONE BDA')
 
-                # 4. Ricerca Targa
+                # 5. Ricerca Targa
+                print(f"Inserimento targa {targa} in BDA...", flush=True)
                 await page.wait_for_selector('input[name="targa"]')
                 await page.fill('input[name="targa"]', targa)
                 await page.click('button:has-text("Avanti")')
 
-                # 5. Estrazione Dati Tecnici Generali da BDA
+                # 6. Lettura Dati Tecnici
                 await page.wait_for_selector('text=Dati veicolo', timeout=10000)
-
                 marca = await page.locator('td:has-text("Marca:") + td').text_content() or ""
                 modello = await page.locator('td:has-text("Descrizione modello:") + td').text_content() or ""
                 kw = await page.locator('td:has-text("KW:") + td').text_content() or ""
@@ -71,7 +77,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 data_immat = await page.locator('td:has-text("Data prima immatricolazione:") + td').text_content() or ""
                 alimentazione = await page.locator('td:has-text("Alimentazione:") + td').text_content() or ""
 
-                # 6. Lettura Attestato di Rischio e Classe CU
+                # 7. Attestato e CU
                 btn_attestato = page.locator('button:has-text("Visualizza Attestato")')
                 classe_cu = ""
                 compagnia_provenienza = ""
@@ -82,7 +88,8 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     classe_cu = await page.locator('td:has-text("Classe CU:") + td').text_content() or ""
                     compagnia_provenienza = await page.locator('td:has-text("Impresa:") + td').text_content() or ""
 
-                # 7. Mappatura e Aggiornamento Trattativa su Airtable
+                # 8. Scrittura finale su Airtable
+                print("Salvataggio dati estratti su Airtable...", flush=True)
                 payload_trattativa = {
                     "fields": {
                         "Marca": marca.strip(),
@@ -96,12 +103,12 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         "Stato Bot Estrazione": "Dati Estratti"
                     }
                 }
-                
-                res = requests.patch(url_trattativa, headers=headers, json=payload_trattativa)
-                res.raise_for_status()
+                requests.patch(url_trattativa, headers=headers, json=payload_trattativa).raise_for_status()
+                print(f"[{record_id}] Elaborazione completata con successo!", flush=True)
 
             except Exception as e:
-                print(f"Errore durante l'estrazione BDA: {str(e)}")
+                err_msg = str(e)[:250]
+                print(f"[{record_id}] ERRORE: {err_msg}", flush=True)
                 requests.patch(
                     url_trattativa,
                     headers=headers,
