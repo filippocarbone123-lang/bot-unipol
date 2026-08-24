@@ -41,7 +41,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
             page = await context.new_page()
 
             try:
-                # PASSO 1: Credenziali di primo livello
+                # 1. Credenziali User/Pass
                 print("1/3 Navigazione e inserimento User/Pass...", flush=True)
                 await page.goto("https://essig.unipolsai.it/my-policy", wait_until="domcontentloaded", timeout=30000)
                 
@@ -57,12 +57,12 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 await page.locator('input[type="submit"], button').first.click()
 
-                # PASSO 2: Schermata intermedia Microsoft MFA
+                # 2. Schermata intermedia MFA
                 print("2/3 Conferma schermata intermedia Microsoft MFA...", flush=True)
                 await page.wait_for_selector('text=/Microsoft MFA|Autenticazione/i', timeout=20000)
                 await page.locator('input[type="submit"], button').first.click()
 
-                # PASSO 3: Codice OTP Authenticator
+                # 3. Inserimento OTP Authenticator
                 print("3/3 Inserimento codice OTP Authenticator...", flush=True)
                 await page.wait_for_selector('text=/verification code/i', timeout=20000)
                 
@@ -72,48 +72,29 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
                 await code_input.fill(totp.now())
 
-                # Clic su Login per salvare la sessione
+                print("Invio OTP e stabilizzazione sessione...", flush=True)
                 await page.locator('input[type="submit"], button').first.click()
                 
-                # Pausa tecnica per la registrazione dei cookie di sessione
-                await page.wait_for_timeout(2500)
+                # Attesa del completamento dell'autenticazione per salvare i cookie di sessione
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    await page.wait_for_timeout(4000)
 
-                # PASSO 4: FORZATURA NAVIGAZIONE DIRETTA (Bypass dei caricamenti home)
-                print("Forzatura navigazione diretta a Leonardo Workspace...", flush=True)
-                await page.goto(
-                    "https://essig.unipolsai.it/WorkspaceWeb/app/configuratore_questionari/questionario",
-                    wait_until="domcontentloaded",
-                    timeout=30000
-                )
+                # 4. Navigazione DIRETTA all'URL BDA ANIA
+                print("Navigazione diretta alla pagina BDA ANIA (DanniWeb/FA)...", flush=True)
+                await page.goto("https://essig.unipolsai.it/DanniWeb/FA/start.do", wait_until="domcontentloaded", timeout=30000)
 
-                print("Apertura menu Strumenti su Leonardo...", flush=True)
-                strumenti_btn = page.locator('text="Strumenti" i, button:has-text("Strumenti")').first
-                await strumenti_btn.wait_for(state="visible", timeout=30000)
-                await strumenti_btn.click()
-
-                print("Apertura menu BDA ANIA...", flush=True)
-                danni_btn = page.locator('text="DANNI" i').first
-                await danni_btn.wait_for(state="visible", timeout=15000)
-                await danni_btn.click()
-
-                rca_btn = page.locator('text="RCA AUTO" i').first
-                await rca_btn.wait_for(state="visible", timeout=15000)
-                await rca_btn.click()
-
-                bda_btn = page.locator('text="CONSULTAZIONE BDA" i').first
-                await bda_btn.wait_for(state="visible", timeout=15000)
-                await bda_btn.click()
-
-                # PASSO 5: Ricerca Targa
+                # 5. Inserimento Targa in BDA
                 print(f"Inserimento targa {targa} in BDA...", flush=True)
-                targa_input = page.locator('input[name="targa" i], input[id*="targa" i]').first
+                targa_input = page.locator('input[name="targa" i], input[id*="targa" i], input[type="text"]').first
                 await targa_input.wait_for(state="visible", timeout=20000)
                 await targa_input.fill(targa)
                 
-                avanti_btn = page.locator('button:has-text("Avanti"), input[type="submit"][value*="Avanti" i]').first
+                avanti_btn = page.locator('button:has-text("Avanti"), input[type="submit"][value*="Avanti" i], input[value*="Avanti" i]').first
                 await avanti_btn.click()
 
-                # PASSO 6: Lettura Dati Tecnici
+                # 6. Lettura Dati Tecnici ANIA
                 print("Lettura scheda veicolo ANIA...", flush=True)
                 await page.wait_for_selector('text=/Dati veicolo|Carta di circolazione/i', timeout=20000)
                 
@@ -124,8 +105,8 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 data_immat = await page.locator('td:has-text("Data prima immatricolazione:") + td').text_content() or ""
                 alimentazione = await page.locator('td:has-text("Alimentazione:") + td').text_content() or ""
 
-                # PASSO 7: Attestato di Rischio e Classe CU
-                btn_attestato = page.locator('button:has-text("Visualizza Attestato"), a:has-text("Visualizza Attestato")').first
+                # 7. Attestato di Rischio e Classe CU
+                btn_attestato = page.locator('button:has-text("Visualizza Attestato"), a:has-text("Visualizza Attestato"), input[value*="Attestato" i]').first
                 classe_cu = ""
                 compagnia_provenienza = ""
 
@@ -135,7 +116,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     classe_cu = await page.locator('td:has-text("Classe CU:") + td').text_content() or ""
                     compagnia_provenienza = await page.locator('td:has-text("Impresa:") + td').text_content() or ""
 
-                # PASSO 8: Scrittura finale su Airtable
+                # 8. Scrittura finale su Airtable
                 print("Salvataggio dati estratti su Airtable...", flush=True)
                 payload_trattativa = {
                     "fields": {
@@ -157,6 +138,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
             except Exception as e:
                 err_msg = str(e)[:250]
                 print(f"[{record_id}] ERRORE: {err_msg}", flush=True)
+                print(f"URL al momento dell'errore: {page.url}", flush=True)
                 requests.patch(
                     url_trattativa,
                     headers=headers,
