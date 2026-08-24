@@ -10,7 +10,10 @@ bot_semaphore = asyncio.Semaphore(1)
 
 UNIPOL_USER = os.getenv("UNIPOL_USER")
 UNIPOL_PASS = os.getenv("UNIPOL_PASS")
-UNIPOL_TOTP_SECRET = os.getenv("UNIPOL_TOTP_SECRET")
+# Pulizia automatica del secret da eventuali spazi accidentali
+RAW_SECRET = os.getenv("UNIPOL_TOTP_SECRET") or ""
+UNIPOL_TOTP_SECRET = RAW_SECRET.replace(" ", "").strip().upper()
+
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 
@@ -40,7 +43,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
             page = await context.new_page()
 
             try:
-                # 1. Login Credenziali
+                # 1. Accesso Credenziali Primo Livello
                 print("1/3 Inserimento Username e Password...", flush=True)
                 await page.goto("https://essig.unipolsai.it/my-policy", wait_until="domcontentloaded", timeout=40000)
                 
@@ -66,34 +69,45 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await login_mfa_btn.wait_for(state="visible", timeout=25000)
                 await login_mfa_btn.click()
 
-                # 3. OTP Authenticator con digitazione tasto per tasto
-                print("3/3 Inserimento OTP Authenticator...", flush=True)
+                # 3. Digitazione e Invio OTP Authenticator
+                print("3/3 Inserimento codice OTP Authenticator...", flush=True)
                 code_input = page.locator('input[type="text"], input[type="number"], input').first
                 await code_input.wait_for(state="visible", timeout=25000)
 
                 totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
                 codice_otp = totp.now()
+                print(f"Codice OTP generato: {codice_otp}", flush=True)
+
+                await code_input.fill("")
+                await code_input.type(codice_otp, delay=120)
                 
-                # Digitazione lenta per attivare gli eventi JavaScript di Microsoft
-                await code_input.type(codice_otp, delay=100)
-                await asyncio.sleep(1)
-
-                submit_otp = page.locator('input[type="submit"], button').first
-                await submit_otp.click()
-
-                # 4. Attesa cambio URL verso WorkspaceWeb (Leonardo)
-                print("Attesa reindirizzamento alla Dashboard Leonardo...", flush=True)
+                # Invio del form tramite combinazione Invio + Click
+                print("Invio form OTP...", flush=True)
+                await page.keyboard.press("Enter")
+                
                 try:
-                    await page.wait_for_url("**/WorkspaceWeb/**", timeout=30000)
+                    login_otp_btn = page.locator('input[type="submit"], button:has-text("Login")').first
+                    if await login_otp_btn.is_visible(timeout=2000):
+                        await login_otp_btn.click()
                 except Exception:
-                    print(f"URL non cambiato subito. URL attuale: {page.url}", flush=True)
+                    pass
 
-                print(f"Accesso confermato! URL attuale: {page.url}", flush=True)
+                # 4. Attesa transizione di pagina lontano da my-policy
+                print("In attesa che la pagina lasci my-policy...", flush=True)
+                try:
+                    await page.wait_for_url(lambda u: "my-policy" not in u, timeout=30000)
+                    print(f"Accesso riuscito! Nuovo URL: {page.url}", flush=True)
+                except Exception:
+                    # Stampa il testo dell'errore presente a schermo se la pagina non cambia
+                    body_text = await page.locator("body").text_content() or ""
+                    clean_text = " ".join(body_text.split())[:300]
+                    print(f"Mancato reindirizzamento. Contenuto pagina: {clean_text}", flush=True)
+                    raise Exception("Invio OTP fallito o codice rifiutato dal portale Unipol.")
 
-                # 5. Selezione Menu Strumenti
+                # 5. Navigazione Menu Strumenti su Leonardo Workspace
                 print("In attesa del menu Strumenti...", flush=True)
                 strumenti_btn = page.locator('text="Strumenti"').first
-                await strumenti_btn.wait_for(state="visible", timeout=30000)
+                await strumenti_btn.wait_for(state="visible", timeout=35000)
                 await strumenti_btn.click()
 
                 print("Apertura menu DANNI...", flush=True)
@@ -197,7 +211,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
             except Exception as e:
                 err_msg = str(e)[:250]
                 print(f"[{record_id}] ERRORE: {err_msg}", flush=True)
-                print(f"URL finale all'errore: {page.url}", flush=True)
                 requests.patch(
                     url_trattativa,
                     headers=headers,
