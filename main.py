@@ -10,7 +10,6 @@ bot_semaphore = asyncio.Semaphore(1)
 
 UNIPOL_USER = os.getenv("UNIPOL_USER")
 UNIPOL_PASS = os.getenv("UNIPOL_PASS")
-# Pulizia automatica del secret da eventuali spazi accidentali
 RAW_SECRET = os.getenv("UNIPOL_TOTP_SECRET") or ""
 UNIPOL_TOTP_SECRET = RAW_SECRET.replace(" ", "").strip().upper()
 
@@ -81,7 +80,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await code_input.fill("")
                 await code_input.type(codice_otp, delay=120)
                 
-                # Invio del form tramite combinazione Invio + Click
                 print("Invio form OTP...", flush=True)
                 await page.keyboard.press("Enter")
                 
@@ -92,19 +90,20 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 except Exception:
                     pass
 
-                # 4. Attesa transizione di pagina lontano da my-policy
-                print("In attesa che la pagina lasci my-policy...", flush=True)
-                try:
-                    await page.wait_for_url(lambda u: "my-policy" not in u, timeout=30000)
-                    print(f"Accesso riuscito! Nuovo URL: {page.url}", flush=True)
-                except Exception:
-                    # Stampa il testo dell'errore presente a schermo se la pagina non cambia
-                    body_text = await page.locator("body").text_content() or ""
-                    clean_text = " ".join(body_text.split())[:300]
-                    print(f"Mancato reindirizzamento. Contenuto pagina: {clean_text}", flush=True)
-                    raise Exception("Invio OTP fallito o codice rifiutato dal portale Unipol.")
+                # 4. Attesa della pagina di sessione (my.policy)
+                print("In attesa di conferma sessione (my.policy)...", flush=True)
+                await page.wait_for_url(lambda u: "my.policy" in u or "WorkspaceWeb" in u, timeout=30000)
+                print(f"Sessione Autenticata! URL attuale: {page.url}", flush=True)
 
-                # 5. Navigazione Menu Strumenti su Leonardo Workspace
+                # 5. Ingresso Diretto in Leonardo Workspace (Ora che i cookie sono attivi)
+                print("Apertura Leonardo Workspace...", flush=True)
+                await page.goto(
+                    "https://essig.unipolsai.it/WorkspaceWeb/app/configuratore_questionari/questionario",
+                    wait_until="domcontentloaded",
+                    timeout=30000
+                )
+
+                # 6. Navigazione Menu Strumenti
                 print("In attesa del menu Strumenti...", flush=True)
                 strumenti_btn = page.locator('text="Strumenti"').first
                 await strumenti_btn.wait_for(state="visible", timeout=35000)
@@ -125,7 +124,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await bda_btn.wait_for(state="visible", timeout=15000)
                 await bda_btn.click()
 
-                # 6. Compilazione Targa nei frame
+                # 7. Compilazione Targa nei frame
                 print(f"Inserimento targa {targa} in BDA...", flush=True)
                 targa_input = None
                 target_frame = page.main_frame
@@ -149,7 +148,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 avanti_btn = target_frame.locator('button:has-text("Avanti"), input[value*="Avanti" i]').first
                 await avanti_btn.click()
 
-                # 7. Estrattore Dati ANIA
+                # 8. Estrattore Dati ANIA
                 print("Estrazione dati veicolo...", flush=True)
                 marca, modello, kw, cv, data_immat, alimentazione = "", "", "", "", "", ""
                 
@@ -171,7 +170,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         break
                     await asyncio.sleep(1)
 
-                # 8. Visualizzazione Attestato e CU
+                # 9. Visualizzazione Attestato e CU
                 classe_cu = ""
                 compagnia_provenienza = ""
                 
@@ -189,7 +188,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                             break
                         await asyncio.sleep(1)
 
-                # 9. Scrittura finale su Airtable
+                # 10. Scrittura finale su Airtable
                 print("Salvataggio dati estratti su Airtable...", flush=True)
                 payload_trattativa = {
                     "fields": {
@@ -200,7 +199,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         "Data Immatricolazione": data_immat.strip(),
                         "Alimentazione": alimentazione.strip(),
                         "Classe CU": classe_cu.strip(),
-                        "Compagnia Provenienza": compagnia_provenienza.strip(),
+                        "Compagnia Provenienza": provincia if (provincia := compagnia_provenienza.strip()) else "",
                         "Stato Bot Estrazione": "Dati Estratti"
                     }
                 }
