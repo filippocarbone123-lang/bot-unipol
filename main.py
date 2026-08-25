@@ -83,9 +83,19 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
         )
 
         async with async_playwright() as p:
+            # Parametri ottimizzati anti-OOM Crash su Render
             browser = await p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-setuid-sandbox",
+                    "--no-zygote",
+                    "--js-flags=--max-old-space-size=256",
+                    "--disable-accelerated-2d-canvas",
+                    "--disable-background-networking"
+                ]
             )
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -175,7 +185,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await smart_click(page, "CONFERMA")
                 await page.wait_for_timeout(4000)
 
-                # Compilazione CIP 125 e Targa su qualunque iframe visibile
+                # Compilazione CIP 125 e Targa
                 print("Compilazione maschera Preventivo...", flush=True)
                 for frame in page.frames:
                     try:
@@ -198,7 +208,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     except Exception:
                         continue
 
-                await page.wait_for_timeout(6000)
+                await page.wait_for_timeout(5000)
 
                 # Estrazione Scheda DATI ASSICURATIVI
                 for frame in page.frames:
@@ -206,7 +216,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         tab1 = frame.locator('text="DATI ASSICURATIVI", td:has-text("DATI ASSICURATIVI")').first
                         if await tab1.is_visible(timeout=500):
                             await tab1.click(force=True)
-                            await page.wait_for_timeout(1500)
+                            await page.wait_for_timeout(1000)
                             break
                     except Exception:
                         pass
@@ -223,7 +233,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         tab2 = frame.locator('text="Figure contrattuali", td:has-text("Figure contrattuali")').first
                         if await tab2.is_visible(timeout=500):
                             await tab2.click(force=True)
-                            await page.wait_for_timeout(1500)
+                            await page.wait_for_timeout(1000)
                             break
                     except Exception:
                         pass
@@ -241,7 +251,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         tab3 = frame.locator('text="Posizione assicurativa", td:has-text("Posizione assicurativa")').first
                         if await tab3.is_visible(timeout=500):
                             await tab3.click(force=True)
-                            await page.wait_for_timeout(1500)
+                            await page.wait_for_timeout(1000)
                             break
                     except Exception:
                         pass
@@ -277,10 +287,10 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     except Exception:
                         continue
 
-                await page.wait_for_timeout(4000)
+                await page.wait_for_timeout(3000)
 
                 # Fallback dati Veicolo da ANIA se mancanti
-                for _ in range(10):
+                for _ in range(8):
                     if not marca: marca = await get_val_from_any_frame(page, ["Marca:"])
                     if not modello: modello = await get_val_from_any_frame(page, ["Descrizione modello:"])
                     if not kw: kw = await get_val_from_any_frame(page, ["KW:"])
@@ -295,13 +305,13 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         btn_att = frame.locator('button:has-text("Visualizza Attestato"), input[value*="Attestato" i]').first
                         if await btn_att.is_visible(timeout=500):
                             await btn_att.click()
-                            await page.wait_for_timeout(2500)
+                            await page.wait_for_timeout(2000)
                             break
                     except Exception:
                         continue
 
                 # Fallback CU e Compagnia da ANIA se mancanti
-                for _ in range(10):
+                for _ in range(8):
                     if not classe_cu: classe_cu = await get_val_from_any_frame(page, ["Classe CU di assegnazione:", "Classe CU:"])
                     if not compagnia_provenienza: compagnia_provenienza = await get_val_from_any_frame(page, ["Impresa:", "Compagnia di provenienza"])
                     if classe_cu: break
