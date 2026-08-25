@@ -25,7 +25,7 @@ def formatta_targa_spazi(targa_raw: str) -> str:
     return clean
 
 async def smart_click(page, text_target: str, timeout_ms=15000):
-    """Individua il testo nell'interfaccia Angular in modo flessibile ed esegue il clic."""
+    """Individua il testo nell'interfaccia Angular ed esegue il clic."""
     pattern = re.compile(rf"{re.escape(text_target)}", re.IGNORECASE)
     locator = page.get_by_text(pattern).first
     
@@ -228,7 +228,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 print("Estrazione Dati Anagrafici e Veicolo dal Preventivatore...", flush=True)
                 await page.wait_for_timeout(6000)
 
-                nome, cf, data_nas, residenza, comune, prov, cap = "", "", "", "", "", "", ""
+                nome, cf, data_nas, residenza, prov, cap = "", "", "", "", "", ""
                 marca, modello, kw, cv, data_immat, alimentazione = "", "", "", "", "", ""
 
                 for frame in page.frames:
@@ -243,7 +243,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                             cf = await frame.locator('td:has-text("Cod.Fisc/P.IVA") + td, input[name*="cf" i]').text_content() or ""
                             data_nas = await frame.locator('td:has-text("Data di nascita") + td').text_content() or ""
                             residenza = await frame.locator('td:has-text("Indirizzo") + td').text_content() or ""
-                            comune = await frame.locator('td:has-text("Comune") + td').text_content() or ""
                             prov = await frame.locator('td:has-text("Prov") + td').text_content() or ""
                             cap = await frame.locator('td:has-text("CAP") + td').text_content() or ""
 
@@ -317,30 +316,34 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         await asyncio.sleep(1)
 
                 # ==========================================
-                # 💾 SALVATAGGIO FINALE SU AIRTABLE
+                # 💾 SALVATAGGIO FINALE SU AIRTABLE (MAPPING ESATTO)
                 # ==========================================
                 print("Mappatura e Salvataggio dei dati completi su Airtable...", flush=True)
-                payload_trattativa = {
-                    "fields": {
-                        "Nome": nome.strip(),
-                        "Codice Fiscale": cf.strip(),
-                        "A: cl_datanascita": data_nas.strip(),
-                        "A: cl_residenza": residenza.strip(),
-                        "A: cl_comune": comune.strip(),
-                        "A: cl_provincia": prov.strip(),
-                        "A: cl_cap": cap.strip(),
-                        "A: Marca": marca.strip(),
-                        "A: Modello": modello.strip(),
-                        "A: KW": kw.strip(),
-                        "Data immatricolazione": data_immat.strip(),
-                        "Alimentazione": alimentazione.strip(),
-                        "A: Classe CU": classe_cu.strip(),
-                        "Compagnia Provenienza": compagnia_provenienza.strip(),
-                        "Stato Bot Estrazione": "Dati Estratti"
-                    }
+                
+                raw_fields = {
+                    "Nome": nome.strip(),
+                    "Codice Fiscale": cf.strip(),
+                    "cl_datanascita": data_nas.strip(),
+                    "cl_indirizzo": residenza.strip(),
+                    "cl_provincia": prov.strip(),
+                    "cl_cap": cap.strip(),
+                    "Marca": marca.strip(),
+                    "Modello": modello.strip(),
+                    "KW": kw.strip(),
+                    "Data immatricolazione": data_immat.strip(),
+                    "Alimentazione": alimentazione.strip(),
+                    "Classe CU": classe_cu.strip(),
+                    "Compagnia Provenienza": compagnia_provenienza.strip(),
+                    "Stato Bot Estrazione": "Dati Estratti"
                 }
 
+                # Escludiamo i valori vuoti per sicurezza
+                cleaned_fields = {k: v for k, v in raw_fields.items() if v != ""}
+                payload_trattativa = {"fields": cleaned_fields}
+
                 res = requests.patch(url_trattativa, headers=headers, json=payload_trattativa)
+                if res.status_code != 200:
+                    print(f"Risposta Error Airtable: {res.text}", flush=True)
                 res.raise_for_status()
                 print(f"[{record_id}] DOPPIA ESTRAZIONE COMPLETATA CON SUCCESSO!", flush=True)
 
