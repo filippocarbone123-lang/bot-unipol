@@ -170,7 +170,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 target_frame = None
                 for _ in range(30):
                     for frame in page.frames:
-                        if "DanniWeb" in frame.url or await frame.locator('input[type="text"]').count() >= 2:
+                        if "DanniWeb" in frame.url or await frame.locator('input[type="text"]:enabled').count() >= 2:
                             target_frame = frame
                             break
                     if target_frame:
@@ -182,23 +182,25 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 print(f"Compilazione CIP (125) e Targa ('{targa_spazi}')...", flush=True)
                 
-                # Individuazione esclusiva degli input VISIBILI di tipo testo
-                inputs_visibili = []
+                # Seleziona esclusivamente campi di testo abilitati ed editabili
+                inputs_editabili = []
                 all_text_inputs = target_frame.locator('input[type="text"]')
                 for i in range(await all_text_inputs.count()):
                     inp = all_text_inputs.nth(i)
-                    if await inp.is_visible():
-                        inputs_visibili.append(inp)
+                    if await inp.is_visible() and await inp.is_enabled():
+                        is_readonly = await inp.get_attribute("readonly") or await inp.get_attribute("aria-readonly")
+                        if not is_readonly or is_readonly == "false":
+                            inputs_editabili.append(inp)
 
-                if len(inputs_visibili) >= 2:
-                    await inputs_visibili[0].fill("125")
-                    await inputs_visibili[1].fill(targa_spazi)
+                if len(inputs_editabili) >= 2:
+                    await inputs_editabili[0].fill("125")
+                    await inputs_editabili[1].fill(targa_spazi)
                 else:
-                    cip_box = target_frame.locator('td:has-text("CIP") + td input[type="text"]').first
+                    cip_box = target_frame.locator('td:has-text("CIP") + td input:enabled, input[name*="sub" i]:enabled, input[name*="cip" i]:enabled').first
                     await cip_box.wait_for(state="visible", timeout=15000)
                     await cip_box.fill("125")
 
-                    targa_box = target_frame.locator('td:has-text("Targa") + td input[type="text"]').first
+                    targa_box = target_frame.locator('td:has-text("Targa") + td input:enabled, input[name*="targa" i]:enabled, input[id*="targa" i]:enabled').first
                     await targa_box.wait_for(state="visible", timeout=15000)
                     await targa_box.fill(targa_spazi)
 
@@ -288,7 +290,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 print(f"Inserimento targa {targa_pulita} in BDA...", flush=True)
                 for frame in page.frames:
                     try:
-                        inp = frame.locator('input[name*="targa" i], input[id*="targa" i]').first
+                        inp = frame.locator('input[name*="targa" i]:enabled, input[id*="targa" i]:enabled').first
                         if await inp.is_visible(timeout=500):
                             await inp.fill(targa_pulita)
                             btn = frame.locator('button:has-text("Avanti"), input[value*="Avanti" i]').first
