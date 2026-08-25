@@ -40,6 +40,23 @@ async def smart_click(page, text_target: str, timeout_ms=15000):
     except Exception:
         await locator.evaluate("node => (node.closest('button, a, label, div.p-button, div.p-radiobutton, li, input') || node).click()")
 
+async def get_field_value(frame, label_text: str) -> str:
+    """Estrae il valore sia se si trova in una cella TD sia se è dentro un campo INPUT/SELECT."""
+    try:
+        cell = frame.locator(f'td:has-text("{label_text}") + td').first
+        if await cell.count() > 0:
+            inp = cell.locator('input, select').first
+            if await inp.count() > 0:
+                val = await inp.input_value()
+                if val and val.strip():
+                    return val.strip()
+            txt = await cell.text_content()
+            if txt and txt.strip():
+                return txt.strip()
+    except Exception:
+        pass
+    return ""
+
 async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
     async with bot_semaphore:
         headers = {
@@ -229,34 +246,34 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await page.wait_for_timeout(6000)
 
                 nome, cf, data_nas, residenza, prov, cap = "", "", "", "", "", ""
-                marca, modello, kw, cv, data_immat, alimentazione = "", "", "", "", "", ""
+                marca, modello, kw, data_immat, alimentazione = "", "", "", "", ""
 
                 for frame in page.frames:
                     try:
-                        # Dati Anagrafici
+                        # Dati Anagrafici (Tab Figure contrattuali)
                         if await frame.locator('text=/Figure contrattuali|PROPRIETARIO/i').is_visible(timeout=1000):
                             fig_tab = frame.locator('text=/Figure contrattuali|PROPRIETARIO/i').first
                             await fig_tab.click(force=True)
                             await page.wait_for_timeout(1000)
 
-                            nome = await frame.locator('td:has-text("Nominativo") + td, input[name*="nome" i]').text_content() or ""
-                            cf = await frame.locator('td:has-text("Cod.Fisc/P.IVA") + td, input[name*="cf" i]').text_content() or ""
-                            data_nas = await frame.locator('td:has-text("Data di nascita") + td').text_content() or ""
-                            residenza = await frame.locator('td:has-text("Indirizzo") + td').text_content() or ""
-                            prov = await frame.locator('td:has-text("Prov") + td').text_content() or ""
-                            cap = await frame.locator('td:has-text("CAP") + td').text_content() or ""
+                            nome = await get_field_value(frame, "Nominativo")
+                            cf = await get_field_value(frame, "Cod.Fisc/P.IVA")
+                            data_nas = await get_field_value(frame, "Data di nascita")
+                            residenza = await get_field_value(frame, "Indirizzo")
+                            prov = await get_field_value(frame, "Prov")
+                            cap = await get_field_value(frame, "CAP")
 
-                        # Dati Veicolo
+                        # Dati Veicolo (Tab DATI ASSICURATIVI / Veicolo)
                         if await frame.locator('text=/DATI ASSICURATIVI|Veicolo/i').is_visible(timeout=1000):
                             veic_tab = frame.locator('text=/DATI ASSICURATIVI|Veicolo/i').first
                             await veic_tab.click(force=True)
                             await page.wait_for_timeout(1000)
 
-                            marca = await frame.locator('td:has-text("Codice marca") + td, td:has-text("Marca") + td').text_content() or ""
-                            modello = await frame.locator('td:has-text("Descrizione modello") + td').text_content() or ""
-                            kw = await frame.locator('td:has-text("KW") + td').text_content() or ""
-                            data_immat = await frame.locator('td:has-text("Data prima immatricolazione") + td').text_content() or ""
-                            alimentazione = await frame.locator('td:has-text("Alimentazione") + td').text_content() or ""
+                            marca = await get_field_value(frame, "Codice marca") or await get_field_value(frame, "Marca")
+                            modello = await get_field_value(frame, "Descrizione modello")
+                            kw = await get_field_value(frame, "KW")
+                            data_immat = await get_field_value(frame, "Data prima immatricolazione")
+                            alimentazione = await get_field_value(frame, "Alimentazione")
                     except Exception:
                         continue
 
@@ -308,15 +325,18 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         for frame in page.frames:
                             cu_cell = frame.locator('td:has-text("Classe CU:")').first
                             if await cu_cell.is_visible():
-                                classe_cu = await frame.locator('td:has-text("Classe CU:") + td').text_content() or ""
-                                compagnia_provenienza = await frame.locator('td:has-text("Impresa:") + td').text_content() or ""
+                                classe_cu = await get_field_value(frame, "Classe CU:")
+                                compagnia_provenienza = await get_field_value(frame, "Impresa:") or await get_field_value(frame, "Compagnia di provenienza")
                                 break
                         if classe_cu:
                             break
                         await asyncio.sleep(1)
 
+                # Log di verifica dei dati estratti a terminale
+                print(f"VALORI ESTRATTI -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
+
                 # ==========================================
-                # 💾 SALVATAGGIO FINALE SU AIRTABLE (MAPPING ESATTO)
+                # 💾 SALVATAGGIO FINALE SU AIRTABLE
                 # ==========================================
                 print("Mappatura e Salvataggio dei dati completi su Airtable...", flush=True)
                 
@@ -337,7 +357,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     "Stato Bot Estrazione": "Dati Estratti"
                 }
 
-                # Escludiamo i valori vuoti per sicurezza
                 cleaned_fields = {k: v for k, v in raw_fields.items() if v != ""}
                 payload_trattativa = {"fields": cleaned_fields}
 
