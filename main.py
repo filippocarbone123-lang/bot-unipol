@@ -145,37 +145,32 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 print("Ingresso nel Preventivatore Unipol...", flush=True)
                 await page.wait_for_timeout(3000)
 
-                # Apertura Modal PRODOTTI
                 prodotti_btn = page.locator('button:has-text("PRODOTTI"), .p-button:has-text("PRODOTTI")').first
                 await prodotti_btn.click(force=True)
                 await page.wait_for_timeout(1200)
 
-                # 1. ALTRI PRODOTTI DANNI
                 print("Selezione ALTRI PRODOTTI DANNI...", flush=True)
                 await page.get_by_text("ALTRI PRODOTTI DANNI").first.click(force=True)
                 await page.wait_for_timeout(800)
                 await page.locator('button:has-text("CONFERMA")').last.click(force=True)
                 await page.wait_for_timeout(1500)
 
-                # 2. AUTO/NATANTI
                 print("Selezione AUTO/NATANTI...", flush=True)
                 await page.get_by_text("AUTO/NATANTI").first.click(force=True)
                 await page.wait_for_timeout(800)
                 await page.locator('button:has-text("CONFERMA")').last.click(force=True)
                 await page.wait_for_timeout(1500)
 
-                # 3. RCA SINGOLE
                 print("Selezione RCA SINGOLE...", flush=True)
                 await page.get_by_text("RCA SINGOLE").first.click(force=True)
                 await page.wait_for_timeout(1000)
                 await page.locator('button:has-text("CONFERMA")').last.click(force=True)
 
-                # Attesa e intercettazione dell'iframe DanniWeb
                 print("Attesa caricamento effettivo maschera Preventivo RCA...", flush=True)
                 target_frame = None
                 for _ in range(30):
                     for frame in page.frames:
-                        if "DanniWeb" in frame.url or await frame.locator('text=/Emissione\\/Preventivo|Targa/i').count() > 0:
+                        if "DanniWeb" in frame.url or await frame.locator('input[type="text"]').count() >= 2:
                             target_frame = frame
                             break
                     if target_frame:
@@ -185,22 +180,32 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 if not target_frame:
                     target_frame = page.main_frame
 
-                # Compilazione CIP 125 e Targa
                 print(f"Compilazione CIP (125) e Targa ('{targa_spazi}')...", flush=True)
                 
-                cip_box = target_frame.locator('tr:has-text("CIP") input, input[name*="sub" i], input[name*="cip" i]').first
-                await cip_box.wait_for(state="visible", timeout=20000)
-                await cip_box.fill("125")
+                # Individuazione esclusiva degli input VISIBILI di tipo testo
+                inputs_visibili = []
+                all_text_inputs = target_frame.locator('input[type="text"]')
+                for i in range(await all_text_inputs.count()):
+                    inp = all_text_inputs.nth(i)
+                    if await inp.is_visible():
+                        inputs_visibili.append(inp)
 
-                targa_box = target_frame.locator('tr:has-text("Targa") input, input[name*="targa" i], input[id*="targa" i]').first
-                await targa_box.wait_for(state="visible", timeout=20000)
-                await targa_box.fill(targa_spazi)
+                if len(inputs_visibili) >= 2:
+                    await inputs_visibili[0].fill("125")
+                    await inputs_visibili[1].fill(targa_spazi)
+                else:
+                    cip_box = target_frame.locator('td:has-text("CIP") + td input[type="text"]').first
+                    await cip_box.wait_for(state="visible", timeout=15000)
+                    await cip_box.fill("125")
+
+                    targa_box = target_frame.locator('td:has-text("Targa") + td input[type="text"]').first
+                    await targa_box.wait_for(state="visible", timeout=15000)
+                    await targa_box.fill(targa_spazi)
 
                 print("Invio form maschera con clic su Prosegui...", flush=True)
-                prosegui_btn = target_frame.locator('input[value="Prosegui"], button:has-text("Prosegui")').first
+                prosegui_btn = target_frame.locator('input[value*="Prosegui" i], button:has-text("Prosegui")').first
                 await prosegui_btn.click()
 
-                # Attesa elaborazione Preventivo
                 print("Attesa elaborazione risultati Preventivo...", flush=True)
                 await page.wait_for_timeout(6000)
 
@@ -217,12 +222,10 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 if result_frame:
                     print("Ingresso confermato nel Preventivo! Estrazione schede...", flush=True)
                     
-                    # 1. Clic scheda DATI ASSICURATIVI
                     tab_dati = result_frame.locator('text="DATI ASSICURATIVI"').first
                     await tab_dati.click(force=True)
                     await page.wait_for_timeout(2000)
 
-                    # Sub-tab Veicolo/attestato
                     sub_veic = result_frame.locator('text=/Veicolo/i').first
                     if await sub_veic.is_visible():
                         await sub_veic.click(force=True)
@@ -234,7 +237,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     data_immat = await get_val_from_any_frame(page, ["Data prima immatricolazione"])
                     alimentazione = await get_val_from_any_frame(page, ["Alimentazione"])
 
-                    # 2. Sub-tab Figure contrattuali
                     sub_fig = result_frame.locator('text="Figure contrattuali"').first
                     if await sub_fig.is_visible():
                         await sub_fig.click(force=True)
@@ -247,7 +249,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     prov = await get_val_from_any_frame(page, ["Prov"])
                     cap = await get_val_from_any_frame(page, ["CAP"])
 
-                    # 3. Sub-tab Posizione assicurativa
                     sub_pos = result_frame.locator('text="Posizione assicurativa"').first
                     if await sub_pos.is_visible():
                         await sub_pos.click(force=True)
@@ -298,7 +299,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 await page.wait_for_timeout(3000)
 
-                # Fallback dati Veicolo da ANIA se mancanti
                 for _ in range(8):
                     if not marca: marca = await get_val_from_any_frame(page, ["Marca:"])
                     if not modello: modello = await get_val_from_any_frame(page, ["Descrizione modello:"])
@@ -308,7 +308,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     if marca or kw: break
                     await asyncio.sleep(1)
 
-                # Clic su Visualizza Attestato BDA
                 for frame in page.frames:
                     try:
                         btn_att = frame.locator('button:has-text("Visualizza Attestato"), input[value*="Attestato" i]').first
@@ -319,7 +318,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     except Exception:
                         continue
 
-                # Fallback CU e Compagnia da ANIA se mancanti
                 for _ in range(8):
                     if not classe_cu: classe_cu = await get_val_from_any_frame(page, ["Classe CU di assegnazione:", "Classe CU:"])
                     if not compagnia_provenienza: compagnia_provenienza = await get_val_from_any_frame(page, ["Impresa:", "Compagnia di provenienza"])
