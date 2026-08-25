@@ -18,30 +18,12 @@ AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 
 def formatta_targa_spazi(targa_raw: str) -> str:
-    """Formatta 'GV535DT' in 'GV 535 DT' per il Preventivatore Unipol."""
     clean = targa_raw.replace(" ", "").upper()
     if len(clean) == 7:
         return f"{clean[:2]} {clean[2:5]} {clean[5:]}"
     return clean
 
-async def smart_click(page, text_target: str, timeout_ms=15000):
-    """Individua il testo nell'interfaccia Angular ed esegue il clic."""
-    pattern = re.compile(rf"{re.escape(text_target)}", re.IGNORECASE)
-    locator = page.get_by_text(pattern).first
-    
-    try:
-        await locator.wait_for(state="attached", timeout=timeout_ms)
-    except Exception:
-        locator = page.locator(f'text=/{text_target}/i').first
-        await locator.wait_for(state="attached", timeout=timeout_ms)
-
-    try:
-        await locator.click(force=True, timeout=3000)
-    except Exception:
-        await locator.evaluate("node => (node.closest('button, a, label, div.p-button, div.p-radiobutton, li, input') || node).click()")
-
 async def get_val_from_any_frame(page, keywords: list) -> str:
-    """Scansiona DINAMICAMENTE tutti gli iframe attivi per trovare il valore affiancato alle etichette."""
     for frame in page.frames:
         for kw in keywords:
             try:
@@ -163,107 +145,127 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 print("Ingresso nel Preventivatore Unipol...", flush=True)
                 await page.wait_for_timeout(3000)
 
-                await smart_click(page, "PRODOTTI")
-                await page.wait_for_timeout(1500)
+                # Apertura Modal PRODOTTI
+                prodotti_btn = page.locator('button:has-text("PRODOTTI"), .p-button:has-text("PRODOTTI")').first
+                await prodotti_btn.click(force=True)
+                await page.wait_for_timeout(1200)
 
+                # 1. ALTRI PRODOTTI DANNI
                 print("Selezione ALTRI PRODOTTI DANNI...", flush=True)
-                await smart_click(page, "ALTRI PRODOTTI DANNI")
-                await page.wait_for_timeout(1000)
-                await smart_click(page, "CONFERMA")
+                await page.get_by_text("ALTRI PRODOTTI DANNI").first.click(force=True)
+                await page.wait_for_timeout(800)
+                await page.locator('button:has-text("CONFERMA")').last.click(force=True)
                 await page.wait_for_timeout(1500)
 
+                # 2. AUTO/NATANTI
                 print("Selezione AUTO/NATANTI...", flush=True)
-                await smart_click(page, "AUTO/NATANTI")
-                await page.wait_for_timeout(1000)
-                await smart_click(page, "CONFERMA")
+                await page.get_by_text("AUTO/NATANTI").first.click(force=True)
+                await page.wait_for_timeout(800)
+                await page.locator('button:has-text("CONFERMA")').last.click(force=True)
                 await page.wait_for_timeout(1500)
 
+                # 3. RCA SINGOLE
                 print("Selezione RCA SINGOLE...", flush=True)
-                await smart_click(page, "RCA SINGOLE")
+                await page.get_by_text("RCA SINGOLE").first.click(force=True)
                 await page.wait_for_timeout(1000)
-                await smart_click(page, "CONFERMA")
-                await page.wait_for_timeout(4000)
+                await page.locator('button:has-text("CONFERMA")').last.click(force=True)
+
+                # Attesa e intercettazione dell'iframe DanniWeb
+                print("Attesa caricamento effettivo maschera Preventivo RCA...", flush=True)
+                target_frame = None
+                for _ in range(30):
+                    for frame in page.frames:
+                        if "DanniWeb" in frame.url or await frame.locator('text=/Emissione\\/Preventivo|Targa/i').count() > 0:
+                            target_frame = frame
+                            break
+                    if target_frame:
+                        break
+                    await asyncio.sleep(1)
+
+                if not target_frame:
+                    target_frame = page.main_frame
 
                 # Compilazione CIP 125 e Targa
-                print("Compilazione maschera Preventivo...", flush=True)
-                for frame in page.frames:
-                    try:
-                        c_inp = frame.locator('input[name*="sub" i], input[name*="cip" i], td:has-text("CIP") + td input').first
-                        if await c_inp.is_visible(timeout=500):
-                            await c_inp.fill("125")
+                print(f"Compilazione CIP (125) e Targa ('{targa_spazi}')...", flush=True)
+                
+                cip_box = target_frame.locator('tr:has-text("CIP") input, input[name*="sub" i], input[name*="cip" i]').first
+                await cip_box.wait_for(state="visible", timeout=20000)
+                await cip_box.fill("125")
 
-                        t_inp = frame.locator('input[name*="targa" i], input[id*="targa" i], td:has-text("Targa") + td input').first
-                        if await t_inp.is_visible(timeout=500):
-                            await t_inp.fill(targa_spazi)
-                    except Exception:
-                        continue
+                targa_box = target_frame.locator('tr:has-text("Targa") input, input[name*="targa" i], input[id*="targa" i]').first
+                await targa_box.wait_for(state="visible", timeout=20000)
+                await targa_box.fill(targa_spazi)
 
-                for frame in page.frames:
-                    try:
-                        btn = frame.locator('button:has-text("Prosegui"), input[value*="Prosegui" i], a:has-text("Prosegui")').first
-                        if await btn.is_visible(timeout=500):
-                            await btn.click()
+                print("Invio form maschera con clic su Prosegui...", flush=True)
+                prosegui_btn = target_frame.locator('input[value="Prosegui"], button:has-text("Prosegui")').first
+                await prosegui_btn.click()
+
+                # Attesa elaborazione Preventivo
+                print("Attesa elaborazione risultati Preventivo...", flush=True)
+                await page.wait_for_timeout(6000)
+
+                result_frame = None
+                for _ in range(15):
+                    for frame in page.frames:
+                        if await frame.locator('text="DATI ASSICURATIVI"').count() > 0 or await frame.locator('text="GARANZE E SERVIZI"').count() > 0:
+                            result_frame = frame
                             break
-                    except Exception:
-                        continue
+                    if result_frame:
+                        break
+                    await asyncio.sleep(1)
 
-                await page.wait_for_timeout(5000)
+                if result_frame:
+                    print("Ingresso confermato nel Preventivo! Estrazione schede...", flush=True)
+                    
+                    # 1. Clic scheda DATI ASSICURATIVI
+                    tab_dati = result_frame.locator('text="DATI ASSICURATIVI"').first
+                    await tab_dati.click(force=True)
+                    await page.wait_for_timeout(2000)
 
-                # Estrazione Scheda DATI ASSICURATIVI
-                for frame in page.frames:
-                    try:
-                        tab1 = frame.locator('text="DATI ASSICURATIVI", td:has-text("DATI ASSICURATIVI")').first
-                        if await tab1.is_visible(timeout=500):
-                            await tab1.click(force=True)
-                            await page.wait_for_timeout(1000)
-                            break
-                    except Exception:
-                        pass
+                    # Sub-tab Veicolo/attestato
+                    sub_veic = result_frame.locator('text=/Veicolo/i').first
+                    if await sub_veic.is_visible():
+                        await sub_veic.click(force=True)
+                        await page.wait_for_timeout(1000)
 
-                marca = await get_val_from_any_frame(page, ["Codice marca", "Marca"])
-                modello = await get_val_from_any_frame(page, ["Descrizione modello", "Modello"])
-                kw = await get_val_from_any_frame(page, ["KW"])
-                data_immat = await get_val_from_any_frame(page, ["Data prima immatricolazione"])
-                alimentazione = await get_val_from_any_frame(page, ["Alimentazione"])
+                    marca = await get_val_from_any_frame(page, ["Codice marca", "Marca"])
+                    modello = await get_val_from_any_frame(page, ["Descrizione modello", "Modello"])
+                    kw = await get_val_from_any_frame(page, ["KW"])
+                    data_immat = await get_val_from_any_frame(page, ["Data prima immatricolazione"])
+                    alimentazione = await get_val_from_any_frame(page, ["Alimentazione"])
 
-                # Estrazione Scheda Figure contrattuali
-                for frame in page.frames:
-                    try:
-                        tab2 = frame.locator('text="Figure contrattuali", td:has-text("Figure contrattuali")').first
-                        if await tab2.is_visible(timeout=500):
-                            await tab2.click(force=True)
-                            await page.wait_for_timeout(1000)
-                            break
-                    except Exception:
-                        pass
+                    # 2. Sub-tab Figure contrattuali
+                    sub_fig = result_frame.locator('text="Figure contrattuali"').first
+                    if await sub_fig.is_visible():
+                        await sub_fig.click(force=True)
+                        await page.wait_for_timeout(1500)
 
-                nome = await get_val_from_any_frame(page, ["Nominativo", "PROPRIETARIO"])
-                cf = await get_val_from_any_frame(page, ["Cod.Fisc", "C.F"])
-                data_nas = await get_val_from_any_frame(page, ["Data di nascita"])
-                residenza = await get_val_from_any_frame(page, ["Indirizzo"])
-                prov = await get_val_from_any_frame(page, ["Prov"])
-                cap = await get_val_from_any_frame(page, ["CAP"])
+                    nome = await get_val_from_any_frame(page, ["Nominativo", "PROPRIETARIO"])
+                    cf = await get_val_from_any_frame(page, ["Cod.Fisc", "C.F"])
+                    data_nas = await get_val_from_any_frame(page, ["Data di nascita"])
+                    residenza = await get_val_from_any_frame(page, ["Indirizzo"])
+                    prov = await get_val_from_any_frame(page, ["Prov"])
+                    cap = await get_val_from_any_frame(page, ["CAP"])
 
-                # Estrazione Scheda Posizione assicurativa
-                for frame in page.frames:
-                    try:
-                        tab3 = frame.locator('text="Posizione assicurativa", td:has-text("Posizione assicurativa")').first
-                        if await tab3.is_visible(timeout=500):
-                            await tab3.click(force=True)
-                            await page.wait_for_timeout(1000)
-                            break
-                    except Exception:
-                        pass
+                    # 3. Sub-tab Posizione assicurativa
+                    sub_pos = result_frame.locator('text="Posizione assicurativa"').first
+                    if await sub_pos.is_visible():
+                        await sub_pos.click(force=True)
+                        await page.wait_for_timeout(1500)
 
-                classe_cu = await get_val_from_any_frame(page, ["Classe CU di assegnazione", "Classe CU"])
-                compagnia_provenienza = await get_val_from_any_frame(page, ["Compagnia di provenienza", "Impresa"])
+                    classe_cu = await get_val_from_any_frame(page, ["Classe CU di assegnazione", "Classe CU"])
+                    compagnia_provenienza = await get_val_from_any_frame(page, ["Compagnia di provenienza", "Impresa"])
+
+                else:
+                    nome, cf, data_nas, residenza, prov, cap = "", "", "", "", "", ""
+                    marca, modello, kw, data_immat, alimentazione = "", "", "", "", ""
+                    classe_cu, compagnia_provenienza = "", ""
 
                 # ==========================================
                 # 🔓 MODULO 2: CONSULTAZIONE BDA ANIA (FASE B)
                 # ==========================================
                 print("Passaggio al Modulo BDA per Storia Assicurativa...", flush=True)
                 
-                # Navigazione flessibile anti-timeout
                 try:
                     str_check = page.get_by_text("Strumenti", exact=True).first
                     if not await str_check.is_visible(timeout=1500):
@@ -273,13 +275,13 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 await page.wait_for_timeout(1500)
 
-                await smart_click(page, "Strumenti")
+                await page.get_by_text("Strumenti", exact=True).first.click(force=True)
                 await page.wait_for_timeout(1000)
-                await smart_click(page, "Danni")
+                await page.get_by_text("Danni", exact=True).first.click(force=True)
                 await page.wait_for_timeout(1000)
-                await smart_click(page, "RCA AUTO")
+                await page.get_by_text("RCA AUTO", exact=True).first.click(force=True)
                 await page.wait_for_timeout(1000)
-                await smart_click(page, "CONSULTAZIONE BDA")
+                await page.get_by_text("CONSULTAZIONE BDA", exact=True).first.click(force=True)
                 await page.wait_for_timeout(3000)
 
                 print(f"Inserimento targa {targa_pulita} in BDA...", flush=True)
