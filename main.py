@@ -18,7 +18,7 @@ AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 
 def formatta_targa_spazi(targa_raw: str) -> str:
-    """Formatta 'FA859BH' in 'FA 859 BH' per il Preventivatore Unipol."""
+    """Formatta 'GV535DT' in 'GV 535 DT' per il Preventivatore Unipol."""
     clean = targa_raw.replace(" ", "").upper()
     if len(clean) == 7:
         return f"{clean[:2]} {clean[2:5]} {clean[5:]}"
@@ -83,7 +83,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
         )
 
         async with async_playwright() as p:
-            # Parametri ottimizzati anti-OOM Crash su Render
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
@@ -263,8 +262,16 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 # 🔓 MODULO 2: CONSULTAZIONE BDA ANIA (FASE B)
                 # ==========================================
                 print("Passaggio al Modulo BDA per Storia Assicurativa...", flush=True)
-                await page.goto(leonardo_url, wait_until="domcontentloaded", timeout=20000)
-                await asyncio.sleep(2)
+                
+                # Navigazione flessibile anti-timeout
+                try:
+                    str_check = page.get_by_text("Strumenti", exact=True).first
+                    if not await str_check.is_visible(timeout=1500):
+                        await page.goto(leonardo_url, wait_until="commit", timeout=12000)
+                except Exception:
+                    pass
+
+                await page.wait_for_timeout(1500)
 
                 await smart_click(page, "Strumenti")
                 await page.wait_for_timeout(1000)
