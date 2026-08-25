@@ -25,18 +25,20 @@ def formatta_targa_spazi(targa_raw: str) -> str:
     return clean
 
 async def smart_click(page, text_target: str, timeout_ms=15000):
-    """Individua il testo nell'interfaccia Angular e aziona il clic sul contenitore padre."""
-    locator = page.get_by_text(text_target, exact=True).first
+    """Individua il testo nell'interfaccia Angular in modo flessibile ed esegue il clic."""
+    pattern = re.compile(rf"{re.escape(text_target)}", re.IGNORECASE)
+    locator = page.get_by_text(pattern).first
+    
     try:
         await locator.wait_for(state="attached", timeout=timeout_ms)
     except Exception:
-        locator = page.locator(f'text="{text_target}"').first
+        locator = page.locator(f'text=/{text_target}/i').first
         await locator.wait_for(state="attached", timeout=timeout_ms)
 
     try:
         await locator.click(force=True, timeout=3000)
     except Exception:
-        await locator.evaluate("node => (node.closest('button, a, label, div.p-button, li') || node).click()")
+        await locator.evaluate("node => (node.closest('button, a, label, div.p-button, div.p-radiobutton, li, input') || node).click()")
 
 async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
     async with bot_semaphore:
@@ -131,40 +133,49 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 # 🔓 MODULO 1: PREVENTIVATORE UNIPOL (FASE A)
                 # ==========================================
                 print("Ingresso nel Preventivatore Unipol...", flush=True)
-                await asyncio.sleep(4)
+                await page.wait_for_timeout(3000)
 
-                # Clic Angular su PRODOTTI
                 await smart_click(page, "PRODOTTI")
+                await page.wait_for_timeout(1500)
 
-                # Selezione ALTRI PRODOTTI DANNI + CONFERMA
                 print("Selezione ALTRI PRODOTTI DANNI...", flush=True)
                 await smart_click(page, "ALTRI PRODOTTI DANNI")
+                await page.wait_for_timeout(1000)
                 await smart_click(page, "CONFERMA")
+                await page.wait_for_timeout(1500)
 
-                # Selezione AUTO/NATANTI + CONFERMA
                 print("Selezione AUTO/NATANTI...", flush=True)
                 await smart_click(page, "AUTO/NATANTI")
+                await page.wait_for_timeout(1000)
                 await smart_click(page, "CONFERMA")
+                await page.wait_for_timeout(1500)
 
-                # Selezione RCA SINGOLE + CONFERMA
                 print("Selezione RCA SINGOLE...", flush=True)
                 await smart_click(page, "RCA SINGOLE")
+                await page.wait_for_timeout(1000)
                 await smart_click(page, "CONFERMA")
+                await page.wait_for_timeout(3000)
 
                 # Compilazione Targa con spazi e CIP 125
                 print("Compilazione maschera Preventivo (CIP 125 e Targa con spazi)...", flush=True)
-                await page.wait_for_timeout(4000)
-
                 target_frame = page.main_frame
-                for frame in page.frames:
-                    if await frame.locator('input[name*="targa" i], input[id*="targa" i]').is_visible():
-                        target_frame = frame
+                for _ in range(15):
+                    for frame in page.frames:
+                        try:
+                            inp = frame.locator('input[name*="targa" i], input[id*="targa" i]').first
+                            if await inp.is_visible():
+                                target_frame = frame
+                                break
+                        except Exception:
+                            continue
+                    if target_frame != page.main_frame:
                         break
+                    await asyncio.sleep(1)
 
                 targa_input = target_frame.locator('input[name*="targa" i], input[id*="targa" i], input[type="text"]').first
                 await targa_input.fill(targa_spazi)
 
-                cip_input = target_frame.locator('input[name*="cip" i], input[name*="sub" i], input[id*="cip" i]').first
+                cip_input = target_frame.locator('input[name*="sub" i], input[name*="cip" i], input[id*="cip" i]').first
                 if await cip_input.is_visible():
                     await cip_input.fill("125")
 
@@ -173,7 +184,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 # Estrazione Dati Tecnici e Anagrafici dal Preventivatore
                 print("Estrazione Dati Anagrafici e Veicolo dal Preventivatore...", flush=True)
-                await page.wait_for_timeout(5000)
+                await page.wait_for_timeout(6000)
 
                 nome, cf, data_nas, residenza, comune, prov, cap = "", "", "", "", "", "", ""
                 marca, modello, kw, cv, data_immat, alimentazione = "", "", "", "", "", ""
@@ -217,8 +228,11 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await asyncio.sleep(2)
 
                 await smart_click(page, "Strumenti")
+                await page.wait_for_timeout(1000)
                 await smart_click(page, "Danni")
+                await page.wait_for_timeout(1000)
                 await smart_click(page, "RCA AUTO")
+                await page.wait_for_timeout(1000)
                 await smart_click(page, "CONSULTAZIONE BDA")
 
                 # Compilazione Targa in BDA (Senza spazi)
