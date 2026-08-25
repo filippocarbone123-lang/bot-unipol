@@ -156,42 +156,40 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await smart_click(page, "CONFERMA")
                 await page.wait_for_timeout(4000)
 
-                # Compilazione Targa con spazi e CIP 125 (Filtro visibilità stretto)
+                # Riconoscimento frame maschera Preventivo
                 print("Compilazione maschera Preventivo (CIP 125 e Targa con spazi)...", flush=True)
-                target_frame = page.main_frame
-                targa_input = None
-
-                for _ in range(20):
+                target_frame = None
+                
+                for _ in range(25):
                     for frame in page.frames:
                         try:
-                            # Cerca solo input visibili ed escludi hiddenData
-                            inp = frame.locator('input[name*="targa" i]:visible, input[id*="targa" i]:visible, td:has-text("Targa") + td input:visible, td:has-text("Telaio") + td input:visible').first
-                            if await inp.is_visible(timeout=1000):
-                                targa_input = inp
+                            if await frame.locator('text=/Targa|Telaio|Sub agenzia/i').first.is_visible(timeout=400):
                                 target_frame = frame
                                 break
                         except Exception:
                             continue
-                    if targa_input:
+                    if target_frame:
                         break
                     await asyncio.sleep(1)
 
-                if not targa_input:
-                    # Fallback mirato solo su input visibili
-                    targa_input = page.locator('input[name*="targa" i]:visible, input[id*="targa" i]:visible').first
-                    await targa_input.wait_for(state="visible", timeout=15000)
+                if not target_frame:
+                    target_frame = page.main_frame
 
+                # Compilazione Targa
+                targa_input = target_frame.locator('td:has-text("Targa") + td input, input[name*="targa" i], input[id*="targa" i], tr:has-text("Targa") input').first
+                await targa_input.wait_for(state="visible", timeout=15000)
                 await targa_input.click()
                 await targa_input.fill(targa_spazi)
 
-                cip_input = target_frame.locator('input[name*="sub" i]:visible, input[name*="cip" i]:visible, input[id*="cip" i]:visible, td:has-text("CIP") + td input:visible').first
+                # Compilazione CIP 125
                 try:
+                    cip_input = target_frame.locator('td:has-text("CIP") + td input, input[name*="sub" i], input[name*="cip" i]').first
                     if await cip_input.is_visible(timeout=2000):
                         await cip_input.fill("125")
                 except Exception:
                     pass
 
-                prosegui_btn = target_frame.locator('button:has-text("Prosegui"):visible, input[value*="Prosegui" i]:visible, a:has-text("Prosegui"):visible').first
+                prosegui_btn = target_frame.locator('button:has-text("Prosegui"), input[value*="Prosegui" i], a:has-text("Prosegui")').first
                 await prosegui_btn.click()
 
                 # Estrazione Dati Tecnici e Anagrafici dal Preventivatore
@@ -253,13 +251,16 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 target_frame_bda = page.main_frame
                 for frame in page.frames:
-                    inp = frame.locator('input[name*="targa" i]:visible, input[id*="targa" i]:visible').first
-                    if await inp.is_visible():
-                        target_frame_bda = frame
-                        await inp.fill(targa_pulita)
-                        break
+                    try:
+                        inp = frame.locator('input[name*="targa" i], input[id*="targa" i]').first
+                        if await inp.is_visible(timeout=500):
+                            target_frame_bda = frame
+                            await inp.fill(targa_pulita)
+                            break
+                    except Exception:
+                        continue
 
-                avanti_bda = target_frame_bda.locator('button:has-text("Avanti"):visible, input[value*="Avanti" i]:visible').first
+                avanti_bda = target_frame_bda.locator('button:has-text("Avanti"), input[value*="Avanti" i]').first
                 await avanti_bda.click()
 
                 # Visualizzazione Attestato e CU
@@ -269,7 +270,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 classe_cu = ""
                 compagnia_provenienza = ""
 
-                btn_att = target_frame_bda.locator('button:has-text("Visualizza Attestato"):visible, input[value*="Attestato" i]:visible').first
+                btn_att = target_frame_bda.locator('button:has-text("Visualizza Attestato"), input[value*="Attestato" i]').first
                 if await btn_att.is_visible():
                     await btn_att.click()
                     for _ in range(12):
