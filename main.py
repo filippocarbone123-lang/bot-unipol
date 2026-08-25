@@ -18,17 +18,14 @@ AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 
 def formatta_targa_spazi(targa_raw: str) -> str:
-    """Formatta 'DL389LB' in 'DL 389 LB' per il Preventivatore Unipol."""
     clean = targa_raw.replace(" ", "").upper()
     if len(clean) == 7:
         return f"{clean[:2]} {clean[2:5]} {clean[5:]}"
     return clean
 
 async def smart_click(page, text_target: str, timeout_ms=15000):
-    """Individua il testo nell'interfaccia Angular ed esegue il clic."""
     pattern = re.compile(rf"{re.escape(text_target)}", re.IGNORECASE)
     locator = page.get_by_text(pattern).first
-    
     try:
         await locator.wait_for(state="attached", timeout=timeout_ms)
     except Exception:
@@ -39,23 +36,6 @@ async def smart_click(page, text_target: str, timeout_ms=15000):
         await locator.click(force=True, timeout=3000)
     except Exception:
         await locator.evaluate("node => (node.closest('button, a, label, div.p-button, div.p-radiobutton, li, input') || node).click()")
-
-async def get_field_value(frame, label_text: str) -> str:
-    """Estrae il valore sia se si trova in una cella TD sia se è dentro un campo INPUT/SELECT."""
-    try:
-        cell = frame.locator(f'td:has-text("{label_text}") + td').first
-        if await cell.count() > 0:
-            inp = cell.locator('input, select').first
-            if await inp.count() > 0:
-                val = await inp.input_value()
-                if val and val.strip():
-                    return val.strip()
-            txt = await cell.text_content()
-            if txt and txt.strip():
-                return txt.strip()
-    except Exception:
-        pass
-    return ""
 
 async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
     async with bot_semaphore:
@@ -87,10 +67,8 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
             try:
                 # ==========================================
-                # 🔒 INIZIO ZONA IN CASSAFORTE (LOGIN & MFA)
+                # 🔒 ZONA IN CASSAFORTE (LOGIN & MFA)
                 # ==========================================
-                
-                # 1. Accesso Credenziali Primo Livello
                 print("1/4 Inserimento Username e Password...", flush=True)
                 await page.goto("https://essig.unipolsai.it/my-policy", wait_until="domcontentloaded", timeout=40000)
                 
@@ -110,13 +88,11 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 await page.locator('input[type="submit"], button').first.click()
 
-                # 2. MFA Microsoft Intermedio
                 print("2/4 Schermata intermedia MFA...", flush=True)
                 login_mfa_btn = page.locator('input[type="submit"], button').first
                 await login_mfa_btn.wait_for(state="visible", timeout=25000)
                 await login_mfa_btn.click()
 
-                # 3. Digitazione e Invio OTP Authenticator
                 print("3/4 Inserimento codice OTP...", flush=True)
                 code_input = page.locator('input[type="text"], input[type="number"], input').first
                 await code_input.wait_for(state="visible", timeout=25000)
@@ -133,7 +109,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 print("Attesa 6s per registrazione sessione di sicurezza...", flush=True)
                 await asyncio.sleep(6)
 
-                # 4. Navigazione forzata a Leonardo
                 print("Forzatura URL Leonardo...", flush=True)
                 leonardo_url = "https://essig.unipolsai.it/WorkspaceWeb/app/configuratore_questionari/questionario"
                 
@@ -145,6 +120,11 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     await page.goto(leonardo_url, wait_until="domcontentloaded", timeout=20000)
 
                 print(f"Atterraggio completato su: {page.url}", flush=True)
+
+                # Variables
+                nome, cf, data_nas, residenza, prov, cap = "", "", "", "", "", ""
+                marca, modello, kw, data_immat, alimentazione = "", "", "", "", ""
+                classe_cu, compagnia_provenienza = "", ""
 
                 # ==========================================
                 # 🔓 MODULO 1: PREVENTIVATORE UNIPOL (FASE A)
@@ -173,107 +153,49 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await smart_click(page, "CONFERMA")
                 await page.wait_for_timeout(4000)
 
-                # Compilazione Maschera Preventivo DanniWeb
-                print("Compilazione maschera Preventivo (CIP 125 e Targa con spazi)...", flush=True)
-                target_frame = page.main_frame
-                
-                for _ in range(15):
-                    for frame in page.frames:
-                        if "DanniWeb" in frame.url or "FA" in frame.url:
-                            target_frame = frame
-                            break
-                        try:
-                            if await frame.locator('input[type="text"]').count() >= 2:
-                                target_frame = frame
-                                break
-                        except Exception:
-                            continue
-                    if target_frame != page.main_frame:
-                        break
-                    await asyncio.sleep(1)
-
-                # Inserimento CIP 125 sui campi visibili
-                cip_done = False
-                for loc in [
-                    target_frame.locator('input[name*="sub" i]'),
-                    target_frame.locator('input[name*="cip" i]'),
-                    target_frame.locator('input[type="text"]')
-                ]:
-                    cnt = await loc.count()
-                    for i in range(cnt):
-                        el = loc.nth(i)
-                        if await el.is_visible():
-                            try:
-                                await el.fill("125")
-                                cip_done = True
-                                break
-                            except Exception:
-                                pass
-                    if cip_done:
-                        break
-
-                # Inserimento Targa formattata sui campi visibili
-                targa_done = False
-                for loc in [
-                    target_frame.locator('input[name*="targa" i]'),
-                    target_frame.locator('input[id*="targa" i]'),
-                    target_frame.locator('input[type="text"]')
-                ]:
-                    cnt = await loc.count()
-                    for i in range(cnt):
-                        el = loc.nth(i)
-                        if await el.is_visible():
-                            val = await el.input_value()
-                            if val == "125":
-                                continue
-                            try:
-                                await el.fill(targa_spazi)
-                                targa_done = True
-                                break
-                            except Exception:
-                                pass
-                    if targa_done:
-                        break
-
-                prosegui_btn = target_frame.locator('button:has-text("Prosegui"), input[value*="Prosegui" i], a:has-text("Prosegui")').first
-                try:
-                    await prosegui_btn.click(timeout=5000)
-                except Exception:
-                    await prosegui_btn.evaluate("node => node.click()")
-
-                # Estrazione Dati Tecnici e Anagrafici dal Preventivatore
-                print("Estrazione Dati Anagrafici e Veicolo dal Preventivatore...", flush=True)
-                await page.wait_for_timeout(6000)
-
-                nome, cf, data_nas, residenza, prov, cap = "", "", "", "", "", ""
-                marca, modello, kw, data_immat, alimentazione = "", "", "", "", ""
+                # Compilazione Targa e CIP su tutti gli iframe visibili
+                print("Compilazione maschera Preventivo...", flush=True)
+                for frame in page.frames:
+                    try:
+                        t_inp = frame.locator('input[name*="targa" i], input[id*="targa" i], td:has-text("Targa") + td input').first
+                        if await t_inp.is_visible(timeout=500):
+                            await t_inp.fill(targa_spazi)
+                        
+                        c_inp = frame.locator('input[name*="sub" i], input[name*="cip" i], td:has-text("CIP") + td input').first
+                        if await c_inp.is_visible(timeout=500):
+                            await c_inp.fill("125")
+                    except Exception:
+                        continue
 
                 for frame in page.frames:
                     try:
-                        # Dati Anagrafici (Tab Figure contrattuali)
-                        if await frame.locator('text=/Figure contrattuali|PROPRIETARIO/i').is_visible(timeout=1000):
-                            fig_tab = frame.locator('text=/Figure contrattuali|PROPRIETARIO/i').first
-                            await fig_tab.click(force=True)
-                            await page.wait_for_timeout(1000)
+                        btn = frame.locator('button:has-text("Prosegui"), input[value*="Prosegui" i]').first
+                        if await btn.is_visible(timeout=500):
+                            await btn.click()
+                            break
+                    except Exception:
+                        continue
 
-                            nome = await get_field_value(frame, "Nominativo")
-                            cf = await get_field_value(frame, "Cod.Fisc/P.IVA")
-                            data_nas = await get_field_value(frame, "Data di nascita")
-                            residenza = await get_field_value(frame, "Indirizzo")
-                            prov = await get_field_value(frame, "Prov")
-                            cap = await get_field_value(frame, "CAP")
+                await page.wait_for_timeout(5000)
 
-                        # Dati Veicolo (Tab DATI ASSICURATIVI / Veicolo)
-                        if await frame.locator('text=/DATI ASSICURATIVI|Veicolo/i').is_visible(timeout=1000):
-                            veic_tab = frame.locator('text=/DATI ASSICURATIVI|Veicolo/i').first
-                            await veic_tab.click(force=True)
-                            await page.wait_for_timeout(1000)
-
-                            marca = await get_field_value(frame, "Codice marca") or await get_field_value(frame, "Marca")
-                            modello = await get_field_value(frame, "Descrizione modello")
-                            kw = await get_field_value(frame, "KW")
-                            data_immat = await get_field_value(frame, "Data prima immatricolazione")
-                            alimentazione = await get_field_value(frame, "Alimentazione")
+                # Scansione dinamica Preventivatore su TUTTI i frame
+                for frame in page.frames:
+                    try:
+                        # Dati Anagrafici
+                        if await frame.locator('td:has-text("Nominativo")').first.is_visible(timeout=300):
+                            n_el = frame.locator('td:has-text("Nominativo") + td').first
+                            nome = (await n_el.text_content() or "").strip()
+                        if await frame.locator('td:has-text("Cod.Fisc")').first.is_visible(timeout=300):
+                            c_el = frame.locator('td:has-text("Cod.Fisc") + td').first
+                            cf = (await c_el.text_content() or "").strip()
+                        
+                        # Dati Veicolo
+                        if await frame.locator('td:has-text("Marca")').first.is_visible(timeout=300):
+                            m_el = frame.locator('td:has-text("Marca") + td').first
+                            marca = (await m_el.text_content() or "").strip()
+                        if await frame.locator('td:has-text("Descrizione modello")').first.is_visible(timeout=300):
+                            mod_el = frame.locator('td:has-text("Descrizione modello") + td').first
+                            modello = (await mod_el.text_content() or "").strip()
                     except Exception:
                         continue
 
@@ -281,7 +203,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 # 🔓 MODULO 2: CONSULTAZIONE BDA ANIA (FASE B)
                 # ==========================================
                 print("Passaggio al Modulo BDA per Storia Assicurativa...", flush=True)
-                
                 await page.goto(leonardo_url, wait_until="domcontentloaded", timeout=20000)
                 await asyncio.sleep(2)
 
@@ -292,68 +213,88 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await smart_click(page, "RCA AUTO")
                 await page.wait_for_timeout(1000)
                 await smart_click(page, "CONSULTAZIONE BDA")
+                await page.wait_for_timeout(3000)
 
                 # Compilazione Targa in BDA (Senza spazi)
                 print(f"Inserimento targa {targa_pulita} in BDA...", flush=True)
-                await page.wait_for_timeout(3000)
-
-                target_frame_bda = page.main_frame
                 for frame in page.frames:
                     try:
                         inp = frame.locator('input[name*="targa" i], input[id*="targa" i]').first
                         if await inp.is_visible(timeout=500):
-                            target_frame_bda = frame
                             await inp.fill(targa_pulita)
+                            btn = frame.locator('button:has-text("Avanti"), input[value*="Avanti" i]').first
+                            await btn.click()
                             break
                     except Exception:
                         continue
 
-                avanti_bda = target_frame_bda.locator('button:has-text("Avanti"), input[value*="Avanti" i]').first
-                await avanti_bda.click()
-
-                # Visualizzazione Attestato e CU
-                print("Estrazione Classe CU e Compagnia Provenienza da BDA...", flush=True)
                 await page.wait_for_timeout(4000)
 
-                classe_cu = ""
-                compagnia_provenienza = ""
-
-                btn_att = target_frame_bda.locator('button:has-text("Visualizza Attestato"), input[value*="Attestato" i]').first
-                if await btn_att.is_visible():
-                    await btn_att.click()
-                    for _ in range(12):
-                        for frame in page.frames:
-                            cu_cell = frame.locator('td:has-text("Classe CU:")').first
-                            if await cu_cell.is_visible():
-                                classe_cu = await get_field_value(frame, "Classe CU:")
-                                compagnia_provenienza = await get_field_value(frame, "Impresa:") or await get_field_value(frame, "Compagnia di provenienza")
+                # Scansione dinamica BDA per Dati Veicolo ANIA
+                for _ in range(15):
+                    for frame in page.frames:
+                        try:
+                            if await frame.locator('td:has-text("Marca:")').first.is_visible(timeout=300):
+                                if not marca:
+                                    marca = (await frame.locator('td:has-text("Marca:") + td').first.text_content() or "").strip()
+                                if not modello:
+                                    modello = (await frame.locator('td:has-text("Descrizione modello:") + td').first.text_content() or "").strip()
+                                if not kw:
+                                    kw = (await frame.locator('td:has-text("KW:") + td').first.text_content() or "").strip()
+                                if not data_immat:
+                                    data_immat = (await frame.locator('td:has-text("Data prima immatricolazione:") + td').first.text_content() or "").strip()
+                                if not alimentazione:
+                                    alimentazione = (await frame.locator('td:has-text("Alimentazione:") + td').first.text_content() or "").strip()
                                 break
-                        if classe_cu:
-                            break
-                        await asyncio.sleep(1)
+                        except Exception:
+                            continue
+                    if marca or kw:
+                        break
+                    await asyncio.sleep(1)
 
-                # Log di verifica dei dati estratti a terminale
-                print(f"VALORI ESTRATTI -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
+                # Scansione dinamica BDA per Attestato e CU
+                for frame in page.frames:
+                    try:
+                        btn_att = frame.locator('button:has-text("Visualizza Attestato"), input[value*="Attestato" i]').first
+                        if await btn_att.is_visible(timeout=500):
+                            await btn_att.click()
+                            break
+                    except Exception:
+                        continue
+
+                for _ in range(15):
+                    for frame in page.frames:
+                        try:
+                            if await frame.locator('td:has-text("Classe CU:")').first.is_visible(timeout=300):
+                                classe_cu = (await frame.locator('td:has-text("Classe CU:") + td').first.text_content() or "").strip()
+                                compagnia_provenienza = (await frame.locator('td:has-text("Impresa:") + td').first.text_content() or "").strip()
+                                break
+                        except Exception:
+                            continue
+                    if classe_cu:
+                        break
+                    await asyncio.sleep(1)
+
+                print(f"VALORI ESTRATTI -> Marca: '{marca}', Modello: '{modello}', KW: '{kw}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
 
                 # ==========================================
                 # 💾 SALVATAGGIO FINALE SU AIRTABLE
                 # ==========================================
                 print("Mappatura e Salvataggio dei dati completi su Airtable...", flush=True)
-                
                 raw_fields = {
-                    "Nome": nome.strip(),
-                    "Codice Fiscale": cf.strip(),
-                    "cl_datanascita": data_nas.strip(),
-                    "cl_indirizzo": residenza.strip(),
-                    "cl_provincia": prov.strip(),
-                    "cl_cap": cap.strip(),
-                    "Marca": marca.strip(),
-                    "Modello": modello.strip(),
-                    "KW": kw.strip(),
-                    "Data immatricolazione": data_immat.strip(),
-                    "Alimentazione": alimentazione.strip(),
-                    "Classe CU": classe_cu.strip(),
-                    "Compagnia Provenienza": compagnia_provenienza.strip(),
+                    "Nome": nome,
+                    "Codice Fiscale": cf,
+                    "cl_datanascita": data_nas,
+                    "cl_indirizzo": residenza,
+                    "cl_provincia": prov,
+                    "cl_cap": cap,
+                    "Marca": marca,
+                    "Modello": modello,
+                    "KW": kw,
+                    "Data immatricolazione": data_immat,
+                    "Alimentazione": alimentazione,
+                    "Classe CU": classe_cu,
+                    "Compagnia Provenienza": compagnia_provenienza,
                     "Stato Bot Estrazione": "Dati Estratti"
                 }
 
@@ -361,10 +302,8 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 payload_trattativa = {"fields": cleaned_fields}
 
                 res = requests.patch(url_trattativa, headers=headers, json=payload_trattativa)
-                if res.status_code != 200:
-                    print(f"Risposta Error Airtable: {res.text}", flush=True)
                 res.raise_for_status()
-                print(f"[{record_id}] DOPPIA ESTRAZIONE COMPLETATA CON SUCCESSO!", flush=True)
+                print(f"[{record_id}] ESTRAZIONE COMPLETATA CON SUCCESSO!", flush=True)
 
             except Exception as e:
                 err_msg = str(e)[:250]
@@ -386,4 +325,4 @@ async def trigger_bot(data: dict, background_tasks: BackgroundTasks):
     data_nascita = data.get("data_nascita")
     
     background_tasks.add_task(estrai_dati_bda, record_id, targa, data_nascita)
-    return {"status": "Doppia Estrazione Avviata", "record_id": record_id}
+    return {"status": "Estrazione Avviata", "record_id": record_id}
