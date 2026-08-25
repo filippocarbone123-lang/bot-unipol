@@ -37,6 +37,25 @@ async def smart_click(page, text_target: str, timeout_ms=15000):
     except Exception:
         await locator.evaluate("node => (node.closest('button, a, label, div.p-button, div.p-radiobutton, li, input') || node).click()")
 
+async def estrai_testo_o_input(frame, etichetta: str) -> str:
+    """Cerca l'etichetta ed estrae il valore dal testo o dall'input affiancato."""
+    try:
+        cell = frame.locator(f'td:has-text("{etichetta}"), th:has-text("{etichetta}")').first
+        if await cell.is_visible(timeout=300):
+            target = frame.locator(f'td:has-text("{etichetta}") + td, th:has-text("{etichetta}") + td').first
+            if await target.count() > 0:
+                inp = target.locator('input, select').first
+                if await inp.count() > 0:
+                    v = await inp.input_value()
+                    if v and v.strip() and v.strip() != "125":
+                        return v.strip()
+                testo = await target.text_content()
+                if testo and testo.strip():
+                    return testo.strip()
+    except Exception:
+        pass
+    return ""
+
 async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
     async with bot_semaphore:
         headers = {
@@ -48,12 +67,8 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
         targa_spazi = formatta_targa_spazi(targa)
         targa_pulita = targa.replace(" ", "").upper()
 
-        print(f"[{record_id}] Avvio elaborazione per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
-        requests.patch(
-            url_trattativa,
-            headers=headers,
-            json={"fields": {"Stato Bot Estrazione": "In Corso"}}
-        )
+        print(f"[{record_id}] Avvio elaborazione per targa: {targa_pulita}", flush=True)
+        requests.patch(url_trattativa, headers=headers, json={"fields": {"Stato Bot Estrazione": "In Corso"}})
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -61,7 +76,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"]
             )
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             )
             page = await context.new_page()
 
@@ -119,41 +134,27 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     await asyncio.sleep(2)
                     await page.goto(leonardo_url, wait_until="domcontentloaded", timeout=20000)
 
-                print(f"Atterraggio completato su: {page.url}", flush=True)
-
-                # Variables
-                nome, cf, data_nas, residenza, prov, cap = "", "", "", "", "", ""
-                marca, modello, kw, data_immat, alimentazione = "", "", "", "", ""
-                classe_cu, compagnia_provenienza = "", ""
-
                 # ==========================================
-                # 🔓 MODULO 1: PREVENTIVATORE UNIPOL (FASE A)
+                # 🔓 MODULO 1: PREVENTIVATORE UNIPOL
                 # ==========================================
                 print("Ingresso nel Preventivatore Unipol...", flush=True)
                 await page.wait_for_timeout(3000)
 
                 await smart_click(page, "PRODOTTI")
                 await page.wait_for_timeout(1500)
-
-                print("Selezione ALTRI PRODOTTI DANNI...", flush=True)
                 await smart_click(page, "ALTRI PRODOTTI DANNI")
                 await page.wait_for_timeout(1000)
                 await smart_click(page, "CONFERMA")
                 await page.wait_for_timeout(1500)
-
-                print("Selezione AUTO/NATANTI...", flush=True)
                 await smart_click(page, "AUTO/NATANTI")
                 await page.wait_for_timeout(1000)
                 await smart_click(page, "CONFERMA")
                 await page.wait_for_timeout(1500)
-
-                print("Selezione RCA SINGOLE...", flush=True)
                 await smart_click(page, "RCA SINGOLE")
                 await page.wait_for_timeout(1000)
                 await smart_click(page, "CONFERMA")
                 await page.wait_for_timeout(4000)
 
-                # Compilazione Targa e CIP su tutti gli iframe visibili
                 print("Compilazione maschera Preventivo...", flush=True)
                 for frame in page.frames:
                     try:
@@ -176,33 +177,54 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     except Exception:
                         continue
 
-                await page.wait_for_timeout(5000)
+                await page.wait_for_timeout(6000)
 
-                # Scansione dinamica Preventivatore su TUTTI i frame
+                # Variabili globali estrazione
+                nome, cf, data_nas, residenza, prov, cap = "", "", "", "", "", ""
+                marca, modello, kw, data_immat, alimentazione = "", "", "", "", ""
+                classe_cu, compagnia_provenienza = "", ""
+
+                print("Estrazione Dati Anagrafici e Veicolo con Navigazione Schede...", flush=True)
+                
                 for frame in page.frames:
                     try:
-                        # Dati Anagrafici
-                        if await frame.locator('td:has-text("Nominativo")').first.is_visible(timeout=300):
-                            n_el = frame.locator('td:has-text("Nominativo") + td').first
-                            nome = (await n_el.text_content() or "").strip()
-                        if await frame.locator('td:has-text("Cod.Fisc")').first.is_visible(timeout=300):
-                            c_el = frame.locator('td:has-text("Cod.Fisc") + td').first
-                            cf = (await c_el.text_content() or "").strip()
-                        
-                        # Dati Veicolo
-                        if await frame.locator('td:has-text("Marca")').first.is_visible(timeout=300):
-                            m_el = frame.locator('td:has-text("Marca") + td').first
-                            marca = (await m_el.text_content() or "").strip()
-                        if await frame.locator('td:has-text("Descrizione modello")').first.is_visible(timeout=300):
-                            mod_el = frame.locator('td:has-text("Descrizione modello") + td').first
-                            modello = (await mod_el.text_content() or "").strip()
+                        # TAB 1: DATI ASSICURATIVI
+                        tab1 = frame.locator('text="DATI ASSICURATIVI", td:has-text("DATI ASSICURATIVI")').first
+                        if await tab1.is_visible(timeout=300):
+                            await tab1.click(force=True)
+                            await page.wait_for_timeout(1000)
+                            marca = await estrai_testo_o_input(frame, "Codice marca") or await estrai_testo_o_input(frame, "Marca")
+                            modello = await estrai_testo_o_input(frame, "Descrizione modello")
+                            kw = await estrai_testo_o_input(frame, "KW")
+                            data_immat = await estrai_testo_o_input(frame, "Data prima immatricolazione")
+                            alimentazione = await estrai_testo_o_input(frame, "Alimentazione")
+
+                        # TAB 2: Figure contrattuali
+                        tab2 = frame.locator('text="Figure contrattuali", td:has-text("Figure contrattuali")').first
+                        if await tab2.is_visible(timeout=300):
+                            await tab2.click(force=True)
+                            await page.wait_for_timeout(1000)
+                            nome = await estrai_testo_o_input(frame, "Nominativo")
+                            cf = await estrai_testo_o_input(frame, "Cod.Fisc") or await estrai_testo_o_input(frame, "C.F")
+                            data_nas = await estrai_testo_o_input(frame, "Data di nascita")
+                            residenza = await estrai_testo_o_input(frame, "Indirizzo")
+                            prov = await estrai_testo_o_input(frame, "Prov")
+                            cap = await estrai_testo_o_input(frame, "CAP")
+
+                        # TAB 3: Posizione assicurativa
+                        tab3 = frame.locator('text="Posizione assicurativa", td:has-text("Posizione assicurativa")').first
+                        if await tab3.is_visible(timeout=300):
+                            await tab3.click(force=True)
+                            await page.wait_for_timeout(1000)
+                            classe_cu = await estrai_testo_o_input(frame, "Classe CU")
+                            compagnia_provenienza = await estrai_testo_o_input(frame, "Impresa")
                     except Exception:
                         continue
 
                 # ==========================================
-                # 🔓 MODULO 2: CONSULTAZIONE BDA ANIA (FASE B)
+                # 🔓 MODULO 2: CONSULTAZIONE BDA ANIA
                 # ==========================================
-                print("Passaggio al Modulo BDA per Storia Assicurativa...", flush=True)
+                print("Passaggio al Modulo BDA per Storia Assicurativa (Fallback)...", flush=True)
                 await page.goto(leonardo_url, wait_until="domcontentloaded", timeout=20000)
                 await asyncio.sleep(2)
 
@@ -215,8 +237,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await smart_click(page, "CONSULTAZIONE BDA")
                 await page.wait_for_timeout(3000)
 
-                # Compilazione Targa in BDA (Senza spazi)
-                print(f"Inserimento targa {targa_pulita} in BDA...", flush=True)
+                print("Inserimento targa in BDA...", flush=True)
                 for frame in page.frames:
                     try:
                         inp = frame.locator('input[name*="targa" i], input[id*="targa" i]').first
@@ -230,29 +251,17 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 await page.wait_for_timeout(4000)
 
-                # Scansione dinamica BDA per Dati Veicolo ANIA
-                for _ in range(15):
+                # Recupero dati mancanti da ANIA
+                for _ in range(12):
                     for frame in page.frames:
-                        try:
-                            if await frame.locator('td:has-text("Marca:")').first.is_visible(timeout=300):
-                                if not marca:
-                                    marca = (await frame.locator('td:has-text("Marca:") + td').first.text_content() or "").strip()
-                                if not modello:
-                                    modello = (await frame.locator('td:has-text("Descrizione modello:") + td').first.text_content() or "").strip()
-                                if not kw:
-                                    kw = (await frame.locator('td:has-text("KW:") + td').first.text_content() or "").strip()
-                                if not data_immat:
-                                    data_immat = (await frame.locator('td:has-text("Data prima immatricolazione:") + td').first.text_content() or "").strip()
-                                if not alimentazione:
-                                    alimentazione = (await frame.locator('td:has-text("Alimentazione:") + td').first.text_content() or "").strip()
-                                break
-                        except Exception:
-                            continue
-                    if marca or kw:
-                        break
+                        if not marca: marca = await estrai_testo_o_input(frame, "Marca:")
+                        if not modello: modello = await estrai_testo_o_input(frame, "Descrizione modello:")
+                        if not kw: kw = await estrai_testo_o_input(frame, "KW:")
+                        if not data_immat: data_immat = await estrai_testo_o_input(frame, "Data prima immatricolazione:")
+                        if not alimentazione: alimentazione = await estrai_testo_o_input(frame, "Alimentazione:")
+                    if marca or kw: break
                     await asyncio.sleep(1)
 
-                # Scansione dinamica BDA per Attestato e CU
                 for frame in page.frames:
                     try:
                         btn_att = frame.locator('button:has-text("Visualizza Attestato"), input[value*="Attestato" i]').first
@@ -262,58 +271,35 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     except Exception:
                         continue
 
-                for _ in range(15):
+                await page.wait_for_timeout(2000)
+
+                for _ in range(12):
                     for frame in page.frames:
-                        try:
-                            if await frame.locator('td:has-text("Classe CU:")').first.is_visible(timeout=300):
-                                classe_cu = (await frame.locator('td:has-text("Classe CU:") + td').first.text_content() or "").strip()
-                                compagnia_provenienza = (await frame.locator('td:has-text("Impresa:") + td').first.text_content() or "").strip()
-                                break
-                        except Exception:
-                            continue
-                    if classe_cu:
-                        break
+                        if not classe_cu: classe_cu = await estrai_testo_o_input(frame, "Classe CU:")
+                        if not compagnia_provenienza: compagnia_provenienza = await estrai_testo_o_input(frame, "Impresa:")
+                    if classe_cu: break
                     await asyncio.sleep(1)
 
-                print(f"VALORI ESTRATTI -> Marca: '{marca}', Modello: '{modello}', KW: '{kw}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
+                print(f"VALORI FINALI -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', CU: '{classe_cu}', Comp: '{compagnia_provenienza}'", flush=True)
 
                 # ==========================================
-                # 💾 SALVATAGGIO FINALE SU AIRTABLE
+                # 💾 SALVATAGGIO SU AIRTABLE
                 # ==========================================
-                print("Mappatura e Salvataggio dei dati completi su Airtable...", flush=True)
                 raw_fields = {
-                    "Nome": nome,
-                    "Codice Fiscale": cf,
-                    "cl_datanascita": data_nas,
-                    "cl_indirizzo": residenza,
-                    "cl_provincia": prov,
-                    "cl_cap": cap,
-                    "Marca": marca,
-                    "Modello": modello,
-                    "KW": kw,
-                    "Data immatricolazione": data_immat,
-                    "Alimentazione": alimentazione,
-                    "Classe CU": classe_cu,
-                    "Compagnia Provenienza": compagnia_provenienza,
+                    "Nome": nome, "Codice Fiscale": cf, "cl_datanascita": data_nas, "cl_indirizzo": residenza,
+                    "cl_provincia": prov, "cl_cap": cap, "Marca": marca, "Modello": modello, "KW": kw,
+                    "Data immatricolazione": data_immat, "Alimentazione": alimentazione,
+                    "Classe CU": classe_cu, "Compagnia Provenienza": compagnia_provenienza,
                     "Stato Bot Estrazione": "Dati Estratti"
                 }
 
                 cleaned_fields = {k: v for k, v in raw_fields.items() if v != ""}
-                payload_trattativa = {"fields": cleaned_fields}
-
-                res = requests.patch(url_trattativa, headers=headers, json=payload_trattativa)
-                res.raise_for_status()
+                requests.patch(url_trattativa, headers=headers, json={"fields": cleaned_fields})
                 print(f"[{record_id}] ESTRAZIONE COMPLETATA CON SUCCESSO!", flush=True)
 
             except Exception as e:
-                err_msg = str(e)[:250]
-                print(f"[{record_id}] ERRORE: {err_msg}", flush=True)
-                requests.patch(
-                    url_trattativa,
-                    headers=headers,
-                    json={"fields": {"Stato Bot Estrazione": "Errore"}}
-                )
-
+                print(f"[{record_id}] ERRORE: {str(e)[:250]}", flush=True)
+                requests.patch(url_trattativa, headers=headers, json={"fields": {"Stato Bot Estrazione": "Errore"}})
             finally:
                 await context.close()
                 await browser.close()
@@ -323,6 +309,5 @@ async def trigger_bot(data: dict, background_tasks: BackgroundTasks):
     record_id = data.get("record_id")
     targa = data.get("targa")
     data_nascita = data.get("data_nascita")
-    
     background_tasks.add_task(estrai_dati_bda, record_id, targa, data_nascita)
     return {"status": "Estrazione Avviata", "record_id": record_id}
