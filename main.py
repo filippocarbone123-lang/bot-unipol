@@ -156,28 +156,47 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await smart_click(page, "CONFERMA")
                 await page.wait_for_timeout(4000)
 
-                # Riconoscimento frame maschera Preventivo
+                # Riconoscimento frame e maschera Preventivo DanniWeb
                 print("Compilazione maschera Preventivo (CIP 125 e Targa con spazi)...", flush=True)
-                target_frame = None
+                target_frame = page.main_frame
                 
                 for _ in range(25):
                     for frame in page.frames:
                         try:
-                            if await frame.locator('text=/Targa|Telaio|Sub agenzia/i').first.is_visible(timeout=400):
+                            has_targa_label = await frame.locator('text=/Targa/i').count() > 0
+                            has_cip_label = await frame.locator('text=/CIP/i').count() > 0
+                            if has_targa_label or has_cip_label:
                                 target_frame = frame
                                 break
                         except Exception:
                             continue
-                    if target_frame:
+                    if target_frame != page.main_frame:
                         break
                     await asyncio.sleep(1)
 
-                if not target_frame:
-                    target_frame = page.main_frame
+                # Ricerca flessibile del campo Targa nel frame DanniWeb
+                targa_input = None
+                selettori_targa = [
+                    'td:has-text("Targa / Telaio") + td input',
+                    'td:has-text("Targa") + td input',
+                    'tr:has-text("Targa") input',
+                    'input[name*="targa" i]',
+                    'input[id*="targa" i]'
+                ]
 
-                # Compilazione Targa
-                targa_input = target_frame.locator('td:has-text("Targa") + td input, input[name*="targa" i], input[id*="targa" i], tr:has-text("Targa") input').first
-                await targa_input.wait_for(state="visible", timeout=15000)
+                for sel in selettori_targa:
+                    loc = target_frame.locator(sel).first
+                    try:
+                        if await loc.is_visible(timeout=1000):
+                            targa_input = loc
+                            break
+                    except Exception:
+                        continue
+
+                # Fallback mirato se le tabelle sono renderizzate in modo dinamico
+                if not targa_input:
+                    targa_input = target_frame.locator('input[type="text"]').nth(1)
+
                 await targa_input.click()
                 await targa_input.fill(targa_spazi)
 
