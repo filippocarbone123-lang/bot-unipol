@@ -156,16 +156,17 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 await smart_click(page, "CONFERMA")
                 await page.wait_for_timeout(4000)
 
-                # Riconoscimento frame e maschera Preventivo DanniWeb
+                # Compilazione Maschera Preventivo DanniWeb
                 print("Compilazione maschera Preventivo (CIP 125 e Targa con spazi)...", flush=True)
                 target_frame = page.main_frame
                 
-                for _ in range(25):
+                for _ in range(15):
                     for frame in page.frames:
+                        if "DanniWeb" in frame.url or "FA" in frame.url:
+                            target_frame = frame
+                            break
                         try:
-                            has_targa_label = await frame.locator('text=/Targa/i').count() > 0
-                            has_cip_label = await frame.locator('text=/CIP/i').count() > 0
-                            if has_targa_label or has_cip_label:
+                            if await frame.locator('input[type="text"]').count() >= 2:
                                 target_frame = frame
                                 break
                         except Exception:
@@ -174,42 +175,54 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                         break
                     await asyncio.sleep(1)
 
-                # Ricerca flessibile del campo Targa nel frame DanniWeb
-                targa_input = None
-                selettori_targa = [
-                    'td:has-text("Targa / Telaio") + td input',
-                    'td:has-text("Targa") + td input',
-                    'tr:has-text("Targa") input',
-                    'input[name*="targa" i]',
-                    'input[id*="targa" i]'
-                ]
+                # Inserimento CIP 125 sui campi visibili
+                cip_done = False
+                for loc in [
+                    target_frame.locator('input[name*="sub" i]'),
+                    target_frame.locator('input[name*="cip" i]'),
+                    target_frame.locator('input[type="text"]')
+                ]:
+                    cnt = await loc.count()
+                    for i in range(cnt):
+                        el = loc.nth(i)
+                        if await el.is_visible():
+                            try:
+                                await el.fill("125")
+                                cip_done = True
+                                break
+                            except Exception:
+                                pass
+                    if cip_done:
+                        break
 
-                for sel in selettori_targa:
-                    loc = target_frame.locator(sel).first
-                    try:
-                        if await loc.is_visible(timeout=1000):
-                            targa_input = loc
-                            break
-                    except Exception:
-                        continue
-
-                # Fallback mirato se le tabelle sono renderizzate in modo dinamico
-                if not targa_input:
-                    targa_input = target_frame.locator('input[type="text"]').nth(1)
-
-                await targa_input.click()
-                await targa_input.fill(targa_spazi)
-
-                # Compilazione CIP 125
-                try:
-                    cip_input = target_frame.locator('td:has-text("CIP") + td input, input[name*="sub" i], input[name*="cip" i]').first
-                    if await cip_input.is_visible(timeout=2000):
-                        await cip_input.fill("125")
-                except Exception:
-                    pass
+                # Inserimento Targa formattata sui campi visibili
+                targa_done = False
+                for loc in [
+                    target_frame.locator('input[name*="targa" i]'),
+                    target_frame.locator('input[id*="targa" i]'),
+                    target_frame.locator('input[type="text"]')
+                ]:
+                    cnt = await loc.count()
+                    for i in range(cnt):
+                        el = loc.nth(i)
+                        if await el.is_visible():
+                            val = await el.input_value()
+                            if val == "125":
+                                continue
+                            try:
+                                await el.fill(targa_spazi)
+                                targa_done = True
+                                break
+                            except Exception:
+                                pass
+                    if targa_done:
+                        break
 
                 prosegui_btn = target_frame.locator('button:has-text("Prosegui"), input[value*="Prosegui" i], a:has-text("Prosegui")').first
-                await prosegui_btn.click()
+                try:
+                    await prosegui_btn.click(timeout=5000)
+                except Exception:
+                    await prosegui_btn.evaluate("node => node.click()")
 
                 # Estrazione Dati Tecnici e Anagrafici dal Preventivatore
                 print("Estrazione Dati Anagrafici e Veicolo dal Preventivatore...", flush=True)
