@@ -208,26 +208,14 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 print(f"Compilazione CIP (125) e Targa ('{targa_spazi}')...", flush=True)
                 
-                inputs_editabili = []
-                all_text_inputs = target_frame.locator('input[type="text"]')
-                for i in range(await all_text_inputs.count()):
-                    inp = all_text_inputs.nth(i)
-                    if await inp.is_visible() and await inp.is_enabled():
-                        is_readonly = await inp.get_attribute("readonly") or await inp.get_attribute("aria-readonly")
-                        if not is_readonly or is_readonly == "false":
-                            inputs_editabili.append(inp)
+                # Compilazione chirurgica dei campi mediante selettori specifici PrimeFaces
+                cip_input = target_frame.locator('input[id*="cSagPrp" i], input[name*="cSagPrp" i]').first
+                if await cip_input.count() > 0:
+                    await cip_input.fill("125")
 
-                if len(inputs_editabili) >= 2:
-                    await inputs_editabili[0].fill("125")
-                    await inputs_editabili[1].fill(targa_spazi)
-                else:
-                    cip_box = target_frame.locator('td:has-text("CIP") + td input:enabled, input[name*="sub" i]:enabled').first
-                    await cip_box.wait_for(state="visible", timeout=15000)
-                    await cip_box.fill("125")
-
-                    targa_box = target_frame.locator('td:has-text("Targa") + td input:enabled, input[name*="targa" i]:enabled').first
-                    await targa_box.wait_for(state="visible", timeout=15000)
-                    await targa_box.fill(targa_spazi)
+                targa_input = target_frame.locator('input[id*="trg" i], input[name*="trg" i], td:has-text("Targa") + td input:enabled').first
+                if await targa_input.count() > 0:
+                    await targa_input.fill(targa_spazi)
 
                 print("Invio form maschera con clic su Prosegui...", flush=True)
                 prosegui_btn = target_frame.locator('input[value*="Prosegui" i], button:has-text("Prosegui"), a:has-text("Prosegui")').first
@@ -275,7 +263,6 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 data_nas = estrai_con_regex(r"(?:Data di nascita|Nato il)\s*[:=>\n\-]+\s*(\d{2}/\d{2}/\d{4})", testo_completo)
                 residenza = estrai_con_regex(r"(?:Indirizzo|Residenza)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
                 prov = estrai_con_regex(r"(?:Prov|Provincia)\s*[:=>\n\-]+\s*([A-Z]{2})\b", testo_completo)
-                cap = estrai_con_regex(r"\b(\d{5})\b", testo_completo)
                 
                 marca = estrai_con_regex(r"(?:Codice marca|Marca)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
                 modello = estrai_con_regex(r"(?:Descrizione modello|Modello)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
@@ -288,7 +275,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 print(f"VALORI ESTRATTI CON DUMP -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
 
-                # 4. SALVATAGGIO SU AIRTABLE
+                # 4. SALVATAGGIO SU AIRTABLE (Senza cl_cap per evitare errore 422)
                 print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
                 raw_fields = {
                     "Nome": nome.strip(),
@@ -296,7 +283,6 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     "cl_datanascita": data_nas.strip(),
                     "cl_indirizzo": residenza.strip(),
                     "cl_provincia": prov.strip(),
-                    "cl_cap": cap.strip(),
                     "Marca": marca.strip(),
                     "Modello": modello.strip(),
                     "KW": kw.strip(),
