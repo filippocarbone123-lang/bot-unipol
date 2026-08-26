@@ -65,51 +65,44 @@ async def invia_form_prosegui(page, target_frame) -> bool:
                 continue
     return False
 
-async def clicca_subtab(page, result_frame, nome_tab: str) -> bool:
-    frames = [result_frame] + [f for f in page.frames if f != result_frame]
-    for frame in frames:
-        if not frame:
-            continue
-        for selector in [
-            f'a:has-text("{nome_tab}")',
-            f'button:has-text("{nome_tab}")',
-            f'span:has-text("{nome_tab}")',
-            f'td:has-text("{nome_tab}")',
-            f'text="{nome_tab}"'
-        ]:
-            try:
-                el = frame.locator(selector).first
-                if await el.is_visible(timeout=600):
-                    await el.click(force=True)
-                    return True
-            except Exception:
-                continue
-    return False
+async def attiva_tab_primefaces(target_frame, nome_tab: str) -> bool:
+    """Sblocca e forza il clic sui pannelli PrimeFaces/JSF invocando l'evento JS o cliccando l'elemento <li>."""
+    try:
+        return await target_frame.evaluate('''(tabName) => {
+            const tabs = Array.from(document.querySelectorAll('.ui-tabs-nav li a, ul.ui-tabs-nav li, a[role="tab"]'));
+            const match = tabs.find(t => (t.innerText || t.textContent || '').toLowerCase().includes(tabName.toLowerCase()));
+            if (match) {
+                match.click();
+                if (match.parentElement) match.parentElement.click();
+                return true;
+            }
+            return false;
+        }''', nome_tab)
+    except Exception:
+        return False
 
-async def estrai_dati_scheda(page) -> dict:
-    """Estrae in modo mirato e leggero le coppie etichetta-valore da qualsiasi griglia o tabella PrimeFaces."""
-    mappa = {}
-    for frame in page.frames:
-        try:
-            dati = await frame.evaluate('''() => {
-                let res = {};
-                const labels = Array.from(document.querySelectorAll('label, td, th, span.ui-outputlabel'));
-                
-                labels.forEach(lbl => {
-                    let labelText = (lbl.innerText || lbl.textContent || '').trim().replace(/[:*]/g, '');
-                    if (!labelText || labelText.length < 2 || labelText.length > 50 || /^\\d+$/.test(labelText)) return;
-                    
-                    let cell = lbl.closest('td, th, .ui-panelgrid-cell');
-                    let nextCell = cell ? cell.nextElementSibling : null;
-                    if (!nextCell && cell && cell.parentElement) {
-                        let children = Array.from(cell.parentElement.children);
-                        let idx = children.indexOf(cell);
-                        if (idx >= 0 && idx + 1 < children.length) nextCell = children[idx + 1];
-                    }
+async def estrai_pannello_attivo(target_frame) -> dict:
+    """Estrae i dati esclusivamente dal pannello PrimeFaces visibile, ignorando le tabelle di fondo."""
+    try:
+        return await target_frame.evaluate('''() => {
+            let res = {};
+            // Seleziona solo il pannello attivo
+            const activePanel = document.querySelector('.ui-tabs-panel:not(.ui-helper-hidden)') || document.body;
+            const rows = Array.from(activePanel.querySelectorAll('tr, .ui-panelgrid-cell'));
 
-                    if (nextCell) {
+            rows.forEach(r => {
+                const cells = Array.from(r.querySelectorAll('td, th, div.ui-g-6'));
+                if (cells.length >= 2) {
+                    for (let i = 0; i < cells.length - 1; i += 2) {
+                        let label = (cells[i].innerText || cells[i].textContent || '').trim().replace(/[:*]/g, '');
+                        // Esclude cavalli fiscali e tabelle numeriche
+                        if (!label || label.length < 2 || label.length > 50 || /^\\d+$/.test(label) || label.includes(' - ')) continue;
+
+                        let valTd = cells[i + 1];
+                        if (!valTd) continue;
+
                         let val = '';
-                        let inp = nextCell.querySelector('input, select, textarea');
+                        let inp = valTd.querySelector('input, select, textarea');
                         if (inp) {
                             if (inp.tagName.toLowerCase() === 'select') {
                                 val = inp.options[inp.selectedIndex] ? inp.options[inp.selectedIndex].text : '';
@@ -118,11 +111,11 @@ async def estrai_dati_scheda(page) -> dict:
                             }
                         }
                         if (!val || !val.trim()) {
-                            let pf = nextCell.querySelector('.ui-selectonemenu-label, .ui-selectonemenu-title');
+                            let pf = valTd.querySelector('.ui-selectonemenu-label, .ui-selectonemenu-title, .ui-outputlabel');
                             if (pf) val = pf.innerText || pf.textContent || '';
                         }
                         if (!val || !val.trim()) {
-                            val = nextCell.innerText || nextCell.textContent || '';
+                            val = valTd.innerText || valTd.textContent || '';
                         }
 
                         val = (val || '').trim();
@@ -133,17 +126,15 @@ async def estrai_dati_scheda(page) -> dict:
                             val !== 'ui-button' && 
                             !val.includes('javax.faces') &&
                             !val.includes('\\n')) {
-                            res[labelText] = val;
+                            res[label] = val;
                         }
                     }
-                });
-                return res;
-            }''')
-            if dati:
-                mappa.update(dati)
-        except Exception:
-            continue
-    return mappa
+                }
+            });
+            return res;
+        }''')
+    except Exception:
+        return {}
 
 def cerca_in_mappa(mappa: dict, keywords: list) -> str:
     scarti = ["proprietario", "contraente", "usufruttuario", "conducente", "aggiungi una figura", "0", "cerca", "m20", "m30", "m40"]
@@ -175,7 +166,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
         targa_spazi = formatta_targa_spazi(targa)
         targa_pulita = targa.replace(" ", "").upper()
 
-        print(f"[{record_id}] Avvio estrazione leggera per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
+        print(f"[{record_id}] Avvio estrazione PrimeFaces mirata per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
         requests.patch(
             url_trattativa,
             headers=headers,
@@ -337,7 +328,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 print("Invio form maschera con clic su Prosegui...", flush=True)
                 await invia_form_prosegui(page, target_frame)
 
-                # 3. ATTESA RISULTATI E APERTURA SCHEDE SINCRO
+                # 3. ATTESA RISULTATI E APERTURA DELLE SCHEDE PRIMEFACES
                 print("Attesa calcolo ed elaborazione del Preventivo (fino a 40s)...", flush=True)
                 result_frame = None
                 for _ in range(40):
@@ -356,31 +347,31 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     result_frame = target_frame
 
                 mappa_totale = {}
-                print("RISULTATI PREVENTIVO RILEVATI! Clic ed estrazione schede...", flush=True)
+                print("RISULTATI PREVENTIVO RILEVATI! Clic nativo PrimeFaces ed estrazione...", flush=True)
 
                 # 1. Veicolo
                 print("1/3 Clic su 'DATI ASSICURATIVI' / 'Veicolo'...", flush=True)
-                await clicca_subtab(page, result_frame, "DATI ASSICURATIVI")
+                await attiva_tab_primefaces(result_frame, "DATI ASSICURATIVI")
                 await page.wait_for_timeout(1000)
-                await clicca_subtab(page, result_frame, "Veicolo")
+                await attiva_tab_primefaces(result_frame, "Veicolo")
                 await page.wait_for_timeout(2500)
-                d1 = await estrai_dati_scheda(page)
+                d1 = await estrai_pannello_attivo(result_frame)
                 print(f" -> Scheda Veicolo: {len(d1)} campi estratti", flush=True)
                 mappa_totale.update(d1)
 
                 # 2. Figure contrattuali
                 print("2/3 Clic su 'Figure contrattuali'...", flush=True)
-                await clicca_subtab(page, result_frame, "Figure contrattuali")
+                await attiva_tab_primefaces(result_frame, "Figure contrattuali")
                 await page.wait_for_timeout(2500)
-                d2 = await estrai_dati_scheda(page)
+                d2 = await estrai_pannello_attivo(result_frame)
                 print(f" -> Scheda Figure Contrattuali: {len(d2)} campi estratti", flush=True)
                 mappa_totale.update(d2)
 
                 # 3. Posizione assicurativa
                 print("3/3 Clic su 'Posizione assicurativa'...", flush=True)
-                await clicca_subtab(page, result_frame, "Posizione assicurativa")
+                await attiva_tab_primefaces(result_frame, "Posizione assicurativa")
                 await page.wait_for_timeout(2500)
-                d3 = await estrai_dati_scheda(page)
+                d3 = await estrai_pannello_attivo(result_frame)
                 print(f" -> Scheda Posizione Assicurativa: {len(d3)} campi estratti", flush=True)
                 mappa_totale.update(d3)
 
@@ -403,7 +394,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 data_immat = cerca_in_mappa(mappa_totale, ["Data prima immatricolazione", "Immatricolazione"])
                 alimentazione_raw = cerca_in_mappa(mappa_totale, ["Alimentazione"])
 
-                # Conversione numerica KW
+                # Conversione numerica KW per Airtable
                 kw = None
                 if kw_raw:
                     clean_kw = re.sub(r'[^\d.,]', '', kw_raw).replace(',', '.')
@@ -415,7 +406,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                         except ValueError:
                             kw = None
 
-                # Single-Select Alimentazione
+                # Format Single-Select Alimentazione
                 alimentazione = ""
                 if "BENZINA" in alimentazione_raw.upper():
                     alimentazione = "Benzina"
@@ -439,7 +430,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 print(f"VALORI REALI ESTRATTI -> Nome: '{nome_clean}', CF: '{cf_clean}', Marca: '{marca_clean}', Modello: '{modello_clean}', KW: {kw}, CU: '{classe_cu}', Compagnia: '{compagnia_clean}'", flush=True)
 
-                # 4. SALVATAGGIO SU AIRTABLE CON CLEANUP ANTI-422 (Max 5 tentativi per evitare cicli infiniti)
+                # 4. SALVATAGGIO SU AIRTABLE CON CLEANUP ANTI-422
                 print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
                 
                 raw_fields = {
