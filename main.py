@@ -24,9 +24,7 @@ def formatta_targa_spazi(targa_raw: str) -> str:
     return clean
 
 async def cattura_testo_globale(page) -> str:
-    """Apre tutti gli iframe, legge il testo visibile E tutti i valori degli input/select, unendoli in un unico dump."""
     testo_aggregato = []
-    
     for frame in page.frames:
         try:
             dump = await frame.evaluate('''() => {
@@ -48,11 +46,9 @@ async def cattura_testo_globale(page) -> str:
                 testo_aggregato.append(dump)
         except Exception:
             continue
-            
     return "\n--- FRAME SEPARATOR ---\n".join(testo_aggregato)
 
 def estrai_con_regex(pattern: str, testo: str, default: str = "") -> str:
-    """Cerca un match di testo tramite Regex e restituisce il primo gruppo valido."""
     m = re.search(pattern, testo, re.IGNORECASE | re.MULTILINE)
     if m and m.group(1):
         v = m.group(1).strip()
@@ -95,5 +91,228 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             )
 
-            # Blocco risorse multimediali per azzerare l'uso della RAM
-            await context
+            await context.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
+
+            page = await context.new_page()
+
+            try:
+                # 1. LOGIN & MFA
+                print("1/4 Inserimento Username e Password...", flush=True)
+                await page.goto("https://essig.unipolsai.it/my-policy", wait_until="commit", timeout=40000)
+                
+                user_input = page.locator('input[name="Username" i], input[name="username" i]').first
+                await user_input.wait_for(state="visible", timeout=20000)
+                await user_input.fill(UNIPOL_USER or "")
+
+                pass_input = page.locator('input[type="password"]').first
+                await pass_input.fill(UNIPOL_PASS or "")
+
+                domain_select = page.locator('select[name="domain" i]').first
+                if await domain_select.is_visible():
+                    try:
+                        await domain_select.select_option(label="Uniage", timeout=3000)
+                    except Exception:
+                        await domain_select.select_option(value="Uniage", timeout=3000)
+
+                await page.locator('input[type="submit"], button').first.click()
+
+                print("2/4 Schermata intermedia MFA...", flush=True)
+                login_mfa_btn = page.locator('input[type="submit"], button').first
+                await login_mfa_btn.wait_for(state="visible", timeout=25000)
+                await login_mfa_btn.click()
+
+                print("3/4 Inserimento codice OTP...", flush=True)
+                code_input = page.locator('input[type="text"], input[type="number"], input').first
+                await code_input.wait_for(state="visible", timeout=25000)
+
+                totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
+                codice_otp = totp.now()
+                
+                await code_input.fill("")
+                await code_input.type(codice_otp, delay=100)
+                
+                print("Clic su pulsante Login OTP...", flush=True)
+                await page.locator('input[type="submit"], button').first.click()
+                
+                print("Attesa 6s per registrazione sessione di sicurezza...", flush=True)
+                await asyncio.sleep(6)
+
+                print("Forzatura URL Leonardo...", flush=True)
+                leonardo_url = "https://essig.unipolsai.it/WorkspaceWeb/app/configuratore_questionari/questionario"
+                
+                try:
+                    await page.goto(leonardo_url, wait_until="commit", timeout=20000)
+                except Exception as e:
+                    print(f"Interferenza di rete ({e}), proseguo...", flush=True)
+
+                await page.wait_for_timeout(4000)
+
+                # 2. PREVENTIVATORE UNIPOL
+                print("Ingresso nel Preventivatore Unipol...", flush=True)
+                
+                prodotti_clicked = False
+                for _ in range(20):
+                    for frame in [page.main_frame] + page.frames:
+                        try:
+                            btn = frame.locator('button:has-text("PRODOTTI"), .p-button:has-text("PRODOTTI"), text="PRODOTTI"').first
+                            if await btn.is_visible(timeout=500):
+                                await btn.click(force=True)
+                                prodotti_clicked = True
+                                break
+                        except Exception:
+                            continue
+                    if prodotti_clicked:
+                        break
+                    await asyncio.sleep(1)
+
+                await page.wait_for_timeout(1500)
+
+                print("Selezione ALTRI PRODOTTI DANNI...", flush=True)
+                await page.get_by_text("ALTRI PRODOTTI DANNI").first.click(force=True)
+                await page.wait_for_timeout(800)
+                await page.locator('button:has-text("CONFERMA")').last.click(force=True)
+                await page.wait_for_timeout(1500)
+
+                print("Selezione AUTO/NATANTI...", flush=True)
+                await page.get_by_text("AUTO/NATANTI").first.click(force=True)
+                await page.wait_for_timeout(800)
+                await page.locator('button:has-text("CONFERMA")').last.click(force=True)
+                await page.wait_for_timeout(1500)
+
+                print("Selezione RCA SINGOLE...", flush=True)
+                await page.get_by_text("RCA SINGOLE").first.click(force=True)
+                await page.wait_for_timeout(1000)
+                await page.locator('button:has-text("CONFERMA")').last.click(force=True)
+
+                print("Attesa caricamento maschera Preventivo RCA...", flush=True)
+                target_frame = None
+                for _ in range(30):
+                    for frame in page.frames:
+                        if "DanniWeb" in frame.url or await frame.locator('input[type="text"]:enabled').count() >= 2:
+                            target_frame = frame
+                            break
+                    if target_frame:
+                        break
+                    await asyncio.sleep(1)
+
+                if not target_frame:
+                    target_frame = page.main_frame
+
+                print(f"Compilazione CIP (125) e Targa ('{targa_spazi}')...", flush=True)
+                
+                inputs_editabili = []
+                all_text_inputs = target_frame.locator('input[type="text"]')
+                for i in range(await all_text_inputs.count()):
+                    inp = all_text_inputs.nth(i)
+                    if await inp.is_visible() and await inp.is_enabled():
+                        is_readonly = await inp.get_attribute("readonly") or await inp.get_attribute("aria-readonly")
+                        if not is_readonly or is_readonly == "false":
+                            inputs_editabili.append(inp)
+
+                if len(inputs_editabili) >= 2:
+                    await inputs_editabili[0].fill("125")
+                    await inputs_editabili[1].fill(targa_spazi)
+                else:
+                    cip_box = target_frame.locator('td:has-text("CIP") + td input:enabled, input[name*="sub" i]:enabled').first
+                    await cip_box.wait_for(state="visible", timeout=15000)
+                    await cip_box.fill("125")
+
+                    targa_box = target_frame.locator('td:has-text("Targa") + td input:enabled, input[name*="targa" i]:enabled').first
+                    await targa_box.wait_for(state="visible", timeout=15000)
+                    await targa_box.fill(targa_spazi)
+
+                print("Invio form maschera con clic su Prosegui...", flush=True)
+                prosegui_btn = target_frame.locator('input[value*="Prosegui" i], button:has-text("Prosegui"), a:has-text("Prosegui")').first
+                await prosegui_btn.click()
+
+                # 3. DUMP E SCANSIONE TESTUALE REGEX
+                print("Attesa elaborazione preventivo e apertura schede...", flush=True)
+                await page.wait_for_timeout(6000)
+
+                for frame in page.frames:
+                    try:
+                        for tab_name in ["DATI ASSICURATIVI", "Figure contrattuali", "Posizione assicurativa"]:
+                            t = frame.locator(f'text="{tab_name}"').first
+                            if await t.is_visible():
+                                await t.click(force=True)
+                                await page.wait_for_timeout(1000)
+                    except Exception:
+                        continue
+
+                print("Cattura del dump testuale completo...", flush=True)
+                testo_completo = await cattura_testo_globale(page)
+
+                nome = estrai_con_regex(r"(?:Nominativo|PROPRIETARIO)\s*[:\n\-]+\s*([A-Z\s\']+)", testo_completo)
+                cf = estrai_con_regex(r"(?:Cod\.?\s*Fisc\.?|C\.F\.?)\s*[:\n\-]+\s*([A-Z0-9]{16})", testo_completo)
+                data_nas = estrai_con_regex(r"(?:Data di nascita)\s*[:\n\-]+\s*(\d{2}/\d{2}/\d{4})", testo_completo)
+                residenza = estrai_con_regex(r"(?:Indirizzo|Residenza)\s*[:\n\-]+\s*([^\n]+)", testo_completo)
+                prov = estrai_con_regex(r"(?:Prov|Provincia)\s*[:\n\-]+\s*([A-Z]{2})\b", testo_completo)
+                cap = estrai_con_regex(r"\bCAP\s*[:\n\-]+\s*(\d{5})\b", testo_completo)
+                
+                marca = estrai_con_regex(r"(?:Codice marca|Marca)\s*[:\n\-]+\s*([^\n]+)", testo_completo)
+                modello = estrai_con_regex(r"(?:Descrizione modello|Modello)\s*[:\n\-]+\s*([^\n]+)", testo_completo)
+                kw = estrai_con_regex(r"\bKW\s*[:\n\-]+\s*(\d+(?:[.,]\d+)?)", testo_completo)
+                data_immat = estrai_con_regex(r"(?:Data prima immatricolazione|Data immat\.?)\s*[:\n\-]+\s*(\d{2}/\d{2}/\d{4})", testo_completo)
+                alimentazione = estrai_con_regex(r"(?:Alimentazione)\s*[:\n\-]+\s*([A-Z0-9\s]+)", testo_completo)
+                
+                classe_cu = estrai_con_regex(r"(?:Classe CU|CU di assegnazione)\s*[:\n\-]+\s*(\d+)", testo_completo)
+                compagnia_provenienza = estrai_con_regex(r"(?:Impresa|Compagnia di provenienza)\s*[:\n\-]+\s*([^\n]+)", testo_completo)
+
+                print(f"VALORI ESTRATTI CON DUMP -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
+
+                # 4. SALVATAGGIO SU AIRTABLE
+                print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
+                raw_fields = {
+                    "Nome": nome.strip(),
+                    "Codice Fiscale": cf.strip(),
+                    "cl_datanascita": data_nas.strip(),
+                    "cl_indirizzo": residenza.strip(),
+                    "cl_provincia": prov.strip(),
+                    "cl_cap": cap.strip(),
+                    "Marca": marca.strip(),
+                    "Modello": modello.strip(),
+                    "KW": kw.strip(),
+                    "Data immatricolazione": data_immat.strip(),
+                    "Alimentazione": alimentazione.strip(),
+                    "Classe CU": classe_cu.strip(),
+                    "Compagnia Provenienza": compagnia_provenienza.strip(),
+                    "Stato Bot Estrazione": "Dati Estratti"
+                }
+
+                cleaned_fields = {k: v for k, v in raw_fields.items() if v != ""}
+                payload_trattativa = {"fields": cleaned_fields}
+
+                res = requests.patch(url_trattativa, headers=headers, json=payload_trattativa)
+                if res.status_code != 200:
+                    print(f"Risposta Error Airtable: {res.text}", flush=True)
+                res.raise_for_status()
+                print(f"[{record_id}] ESTRAZIONE COMPLETATA CON SUCCESSO!", flush=True)
+
+            except Exception as e:
+                err_msg = str(e)[:250]
+                print(f"[{record_id}] ERRORE: {err_msg}", flush=True)
+                requests.patch(
+                    url_trattativa,
+                    headers=headers,
+                    json={"fields": {"Stato Bot Estrazione": "Errore"}}
+                )
+
+            finally:
+                await context.close()
+                await browser.close()
+
+# Rotta di controllo dello stato (evita 404 nei check di Render)
+@app.get("/")
+async def root():
+    return {"status": "Bot Unipol Online"}
+
+# Rotta principale flessibile
+@app.post("/estrai")
+@app.post("/estrai/")
+async def trigger_bot(data: dict, background_tasks: BackgroundTasks):
+    record_id = data.get("record_id")
+    targa = data.get("targa")
+    data_nascita = data.get("data_nascita")
+    
+    background_tasks.add_task(estrai_dati_preventivatore, record_id, targa, data_nascita)
+    return {"status": "Estrazione Avviata", "record_id": record_id}
