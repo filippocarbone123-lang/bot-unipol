@@ -37,6 +37,54 @@ async def click_elemento_dinamico(page, testo: str, max_tentativi=20) -> bool:
         await asyncio.sleep(0.5)
     return False
 
+async def invia_form_prosegui(page, target_frame) -> bool:
+    """Strategia di invio form a 3 livelli per superare i blocchi PrimeFaces/JSF."""
+    selectors = [
+        'input[value*="Prosegui" i]',
+        'button:has-text("Prosegui")',
+        'a:has-text("Prosegui")',
+        '[id*="prosegui" i]',
+        'text=/Prosegui/i'
+    ]
+    # Livello 1: Clic sul frame principale individuato
+    for sel in selectors:
+        try:
+            el = target_frame.locator(sel).first
+            if await el.is_visible(timeout=1000):
+                await el.click(force=True)
+                return True
+        except Exception:
+            pass
+
+    # Livello 2: Scansione di tutti gli iframe della pagina
+    for frame in page.frames:
+        for sel in selectors:
+            try:
+                el = frame.locator(sel).first
+                if await el.is_visible(timeout=500):
+                    await el.click(force=True)
+                    return True
+            except Exception:
+                continue
+
+    # Livello 3: Trigger JavaScript diretto nel DOM
+    for frame in page.frames:
+        try:
+            clicked = await frame.evaluate('''() => {
+                const els = Array.from(document.querySelectorAll('input, button, a, span, div'));
+                const btn = els.find(e => (e.value || e.innerText || "").trim().toLowerCase().includes("prosegui"));
+                if (btn) {
+                    (btn.closest('button, input, a') || btn).click();
+                    return true;
+                }
+                return false;
+            }''')
+            if clicked:
+                return True
+        except Exception:
+            continue
+    return False
+
 async def cattura_testo_globale(page) -> str:
     """Estrae sia il testo visibile sia tutti i valori contenuti dentro i campi input/select di ogni iframe."""
     testo_aggregato = []
@@ -169,7 +217,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 await page.wait_for_timeout(4000)
 
-                # 2. PREVENTIVATORE UNIPOL (Navigazione Multi-Frame Dinamica)
+                # 2. PREVENTIVATORE UNIPOL
                 print("Ingresso nel Preventivatore Unipol...", flush=True)
                 await click_elemento_dinamico(page, "PRODOTTI")
                 await page.wait_for_timeout(1500)
@@ -207,14 +255,18 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 print(f"Compilazione CIP (125) e Targa ('{targa_spazi}')...", flush=True)
                 
-                # Compilazione filtrando rigidamente solo campi di testo editabili (esclude checkbox/radio)
+                # Compilazione ed invio eventi DOM
                 cip_input = target_frame.locator('input[type="text"][id*="cSagPrp" i], input[type="text"][name*="cSagPrp" i]').first
                 if await cip_input.count() > 0 and await cip_input.is_visible():
                     await cip_input.fill("125")
+                    await cip_input.dispatch_event("change")
 
                 targa_input = target_frame.locator('input[type="text"][id*="trg" i], input[type="text"][name*="trg" i], td:has-text("Targa") + td input[type="text"]:enabled').first
                 if await targa_input.count() > 0 and await targa_input.is_visible():
                     await targa_input.fill(targa_spazi)
+                    await targa_input.dispatch_event("change")
+                    # Invio diretto tramite tasto Enter per forzare la form JSF
+                    await targa_input.press("Enter")
                 else:
                     inputs_editabili = []
                     all_text_inputs = target_frame.locator('input[type="text"]')
@@ -226,11 +278,13 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                                 inputs_editabili.append(inp)
                     if len(inputs_editabili) >= 2:
                         await inputs_editabili[0].fill("125")
+                        await inputs_editabili[0].dispatch_event("change")
                         await inputs_editabili[1].fill(targa_spazi)
+                        await inputs_editabili[1].dispatch_event("change")
+                        await inputs_editabili[1].press("Enter")
 
                 print("Invio form maschera con clic su Prosegui...", flush=True)
-                prosegui_btn = target_frame.locator('input[value*="Prosegui" i], button:has-text("Prosegui"), a:has-text("Prosegui")').first
-                await prosegui_btn.click()
+                await invia_form_prosegui(page, target_frame)
 
                 # 3. ATTESA DINAMICA RISULTATI PREVENTIVO
                 print("Attesa calcolo ed elaborazione del Preventivo (fino a 40s)...", flush=True)
