@@ -89,7 +89,6 @@ async def clicca_tab_nativo(page, target_frame, nome_tab: str) -> bool:
         f'li:has-text("{nome_tab}")',
         f'text="{nome_tab}"'
     ]
-    
     frames_da_provare = [target_frame] + [f for f in page.frames if f != target_frame]
     for frame in frames_da_provare:
         if not frame:
@@ -104,70 +103,60 @@ async def clicca_tab_nativo(page, target_frame, nome_tab: str) -> bool:
                 continue
     return False
 
-async def estrai_mappa_frame(frame) -> dict:
-    """Mappa in modo mirato tutte le etichette ed i loro valori reali nel frame attivo."""
-    try:
-        return await frame.evaluate('''() => {
-            let res = {};
-
-            // 1. Scan Input e Select visibili
-            const inputs = Array.from(document.querySelectorAll('input:not([type="hidden"]), select, textarea'));
-            inputs.forEach(i => {
-                let val = '';
-                if (i.tagName.toLowerCase() === 'select') {
-                    if (i.selectedIndex >= 0 && i.options[i.selectedIndex]) {
-                        val = i.options[i.selectedIndex].text || '';
+async def converti_input_in_testo_visibile(page) -> str:
+    """Trasforma tutti i campi input e select in nodi di testo visibili nel DOM (simulando la modalità Stampa)."""
+    testo_aggregato = []
+    for frame in page.frames:
+        try:
+            dump = await frame.evaluate('''() => {
+                // Converte input e select in testo visibile affiancato
+                const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
+                inputs.forEach(i => {
+                    let val = '';
+                    if (i.tagName.toLowerCase() === 'select') {
+                        if (i.selectedIndex >= 0 && i.options[i.selectedIndex]) {
+                            val = i.options[i.selectedIndex].text || i.value || '';
+                        }
+                    } else {
+                        val = i.value || i.getAttribute('value') || '';
                     }
-                } else {
-                    val = i.value || i.getAttribute('value') || '';
-                }
-                val = (val || '').trim();
-                
-                if (val && val !== '125' && !val.includes('javax.faces') && val.length < 150) {
-                    let parentTd = i.closest('td');
-                    let labelTd = parentTd ? parentTd.previousElementSibling : null;
-                    let label = labelTd ? (labelTd.innerText || labelTd.textContent || '').trim().replace(/[:*]/g, '') : '';
-                    if (label && label.length > 1 && label.length < 50) {
-                        res[label] = val;
-                    }
-                }
-            });
-
-            // 2. Scan coppie TD/TH (Filtra la tabella cavalli fiscali)
-            const rows = Array.from(document.querySelectorAll('tr'));
-            rows.forEach(r => {
-                const tds = Array.from(r.querySelectorAll('td, th'));
-                if (tds.length >= 2) {
-                    for (let idx = 0; idx < tds.length - 1; idx++) {
-                        let lbl = (tds[idx].innerText || tds[idx].textContent || '').trim().replace(/[:*]/g, '');
-                        let valTd = tds[idx + 1];
-                        
-                        if (lbl && !/^\\d+$/.test(lbl) && lbl.length > 1 && lbl.length < 50 && valTd) {
-                            let textVal = (valTd.innerText || valTd.textContent || '').trim();
-                            if (textVal && !textVal.includes('\\n') && !textVal.includes(' - ') && textVal.length < 120) {
-                                if (!res[lbl] && !textVal.toLowerCase().includes('cerca') && textVal !== 'ui-button') {
-                                    res[lbl] = textVal;
-                                }
-                            }
+                    val = (val || '').trim();
+                    if (val && val !== '125' && !val.includes('javax.faces') && val.length < 150) {
+                        const span = document.createElement('span');
+                        span.innerText = ' ' + val + ' ';
+                        if (i.parentNode) {
+                            i.parentNode.insertBefore(span, i.nextSibling);
                         }
                     }
-                }
-            });
+                });
 
-            return res;
-        }''')
-    except Exception:
-        return {}
+                // Converte menu PrimeFaces
+                const pfLabels = Array.from(document.querySelectorAll('.ui-selectonemenu-label, .ui-selectonemenu-title'));
+                pfLabels.forEach(pf => {
+                    let txt = (pf.innerText || pf.textContent || '').trim();
+                    if (txt && !txt.toLowerCase().includes('seleziona')) {
+                        const span = document.createElement('span');
+                        span.innerText = ' ' + txt + ' ';
+                        if (pf.parentNode) {
+                            pf.parentNode.insertBefore(span, pf.nextSibling);
+                        }
+                    }
+                });
 
-def cerca_valore_mappa(mappa: dict, keywords: list) -> str:
-    scarti = ["proprietario", "contraente", "usufruttuario", "conducente", "aggiungi una figura"]
-    for k_map, v_map in mappa.items():
-        for kw in keywords:
-            if kw.lower() in k_map.lower():
-                val = v_map.strip() if v_map else ""
-                if val and "\n" not in val and val.lower() not in scarti:
-                    return val
-    return ""
+                return document.body ? document.body.innerText : '';
+            }''')
+            if dump and dump.strip():
+                testo_aggregato.append(dump)
+        except Exception:
+            continue
+    return "\n--- FRAME SEPARATOR ---\n".join(testo_aggregato)
+
+def estrai_con_regex(pattern: str, testo: str, default: str = "") -> str:
+    m = re.search(pattern, testo, re.IGNORECASE | re.MULTILINE)
+    if m and m.group(1):
+        v = m.group(1).strip()
+        return v if v != "125" else default
+    return default
 
 def pulisci_valore(valore: str) -> str:
     if not valore:
@@ -189,7 +178,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
         targa_spazi = formatta_targa_spazi(targa)
         targa_pulita = targa.replace(" ", "").upper()
 
-        print(f"[{record_id}] Avvio estrazione guidata per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
+        print(f"[{record_id}] Avvio estrazione vista-stampa per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
         requests.patch(
             url_trattativa,
             headers=headers,
@@ -353,7 +342,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 print("Invio form maschera con clic su Prosegui...", flush=True)
                 await invia_form_prosegui(page, target_frame)
 
-                # 3. ATTESA RISULTATI E APERTURA TAB AJAX
+                # 3. ATTESA RISULTATI E CONVERSIONE TESTO STAMPA
                 print("Attesa calcolo ed elaborazione del Preventivo (fino a 40s)...", flush=True)
                 result_frame = None
                 for _ in range(40):
@@ -371,42 +360,40 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 if not result_frame:
                     result_frame = target_frame
 
-                mappa_totale = {}
-                print("RISULTATI PREVENTIVO RILEVATI! Lettura schede AJAX...", flush=True)
+                print("RISULTATI PREVENTIVO RILEVATI! Apertura ed iniezione nodi di testo...", flush=True)
 
-                schede = [
-                    ("DATI ASSICURATIVI", "Veicolo/natante"),
-                    ("Figure contrattuali", None),
-                    ("Posizione assicurativa", None)
-                ]
+                schede = ["DATI ASSICURATIVI", "Veicolo/natante", "Figure contrattuali", "Posizione assicurativa"]
+                for tab in schede:
+                    print(f"Apertura scheda: '{tab}'...", flush=True)
+                    await clicca_tab_nativo(page, result_frame, tab)
+                    await page.wait_for_timeout(2000)
 
-                for tab_main, sub_tab in schede:
-                    print(f"Apertura scheda: '{tab_main}'...", flush=True)
-                    await clicca_tab_nativo(page, result_frame, tab_main)
-                    await page.wait_for_timeout(2500) # Attesa AJAX
+                print("Iniezione nodi visibili ed estrazione testo tipo Stampa...", flush=True)
+                testo_completo = await converti_input_in_testo_visibile(page)
 
-                    if sub_tab:
-                        await clicca_tab_nativo(page, result_frame, sub_tab)
-                        await page.wait_for_timeout(1500)
+                print("\n================ DUMP TESTO CON VALORI INIETTATI ================", flush=True)
+                print(testo_completo[:3000], flush=True)
+                print("===================================================================\n", flush=True)
 
-                    dati_tab = await estrai_mappa_frame(result_frame)
-                    mappa_totale.update(dati_tab)
-
-                # Estrattore mirato per variabili
-                cf = cerca_valore_mappa(mappa_totale, ["Cod.Fisc/P.IVA", "Cod.Fisc", "C.F.", "Codice Fiscale"])
-                nome = cerca_valore_mappa(mappa_totale, ["Nominativo", "Cliente"])
-                data_nas = cerca_valore_mappa(mappa_totale, ["Data di nascita", "Nato il"])
-                residenza = cerca_valore_mappa(mappa_totale, ["Indirizzo", "Residenza"])
-                prov = cerca_valore_mappa(mappa_totale, ["Prov", "Provincia"])
-                cap = cerca_valore_mappa(mappa_totale, ["CAP"])
+                # Estrazione con Regex dai nodi iniettati
+                cf = estrai_con_regex(r"\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b", testo_completo)
                 
-                marca = cerca_valore_mappa(mappa_totale, ["Codice marca", "Marca"])
-                modello = cerca_valore_mappa(mappa_totale, ["Descrizione modello", "Modello"])
-                kw = cerca_valore_mappa(mappa_totale, ["KW"])
-                data_immat = cerca_valore_mappa(mappa_totale, ["Data prima immatricolazione", "Immatricolazione"])
-                alimentazione_raw = cerca_valore_mappa(mappa_totale, ["Alimentazione"])
+                nome = estrai_con_regex(r"(?:Cod\.?Fisc/P\.IVA|C\.F\.)\s+[A-Z0-9]{16}\s+([A-Z\s\']+?)\s+(?:Data di nascita|Sesso)", testo_completo)
+                if not nome:
+                    nome = estrai_con_regex(r"(?:Nominativo|PROPRIETARIO|Cliente)\s+([A-Z\s\']+?)(?=\s+Cod\.?Fisc|\s+Data|\s+C\.F\.|\n|$)", testo_completo)
                 
-                # Single-Select Alimentazione per Airtable
+                data_nas = estrai_con_regex(r"(?:Data di nascita|Nato il)\s+(\d{2}/\d{2}/\d{4})", testo_completo)
+                residenza = estrai_con_regex(r"(?:Indirizzo|Residenza)\s+([^\n\r]+?)(?=\s+CAP|\s+Prov|\n|$)", testo_completo)
+                prov = estrai_con_regex(r"\bProv(?:incia)?\s+([A-Z]{2})\b", testo_completo)
+                cap = estrai_con_regex(r"\bCAP\s+(\d{5})\b", testo_completo)
+                
+                marca = estrai_con_regex(r"(?:Codice marca|Marca)\s+([A-Z0-9\s\-_]+?)(?=\s+Codice modello|\s+Modello|\n|$)", testo_completo)
+                modello = estrai_con_regex(r"(?:Descrizione modello|Modello)\s+([^\n\r]+?)(?=\s+Codice omologazione|\s+Anno|\s+Alimentazione|\n|$)", testo_completo)
+                kw = estrai_con_regex(r"\bKW\s+(\d+(?:[.,]\d+)?)\b", testo_completo)
+                data_immat = estrai_con_regex(r"(?:Data prima immatricolazione|Immatricolazione)\s+(\d{2}/\d{2}/\d{4})", testo_completo)
+                alimentazione_raw = estrai_con_regex(r"(?:Alimentazione)\s+([A-Z/]+)", testo_completo)
+
+                # Format Single-Select Airtable
                 alimentazione = ""
                 if "BENZINA" in alimentazione_raw.upper():
                     alimentazione = "Benzina"
@@ -419,8 +406,8 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 elif "ELETTRICA" in alimentazione_raw.upper() or "IBRIDA" in alimentazione_raw.upper():
                     alimentazione = "Ibrida/Elettrica"
 
-                classe_cu = cerca_valore_mappa(mappa_totale, ["Classe CU di assegnazione", "Classe CU", "CU"])
-                compagnia_provenienza = cerca_valore_mappa(mappa_totale, ["Impresa", "Compagnia di provenienza"])
+                classe_cu = estrai_con_regex(r"(?:Classe CU di assegnazione|Classe CU|CU di assegnazione|CU)\s+(\d{1,2})\b", testo_completo)
+                compagnia_provenienza = estrai_con_regex(r"(?:Compagnia di provenienza|Impresa)\s+([^\n\r]+?)(?=\s+RCA|\s+Data|\n|$)", testo_completo)
 
                 nome_clean = pulisci_valore(nome)
                 cf_clean = pulisci_valore(cf)
@@ -430,10 +417,13 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 print(f"VALORI REALI ESTRATTI -> Nome: '{nome_clean}', CF: '{cf_clean}', Marca: '{marca_clean}', Modello: '{modello_clean}', CU: '{classe_cu}', Compagnia: '{compagnia_clean}'", flush=True)
 
-                # 4. SALVATAGGIO SU AIRTABLE CON RETRY AUTOMATICO ANTI-422
+                # 4. SALVATAGGIO SU AIRTABLE CON RETRY DINAMICO PER NOMI DI CAMPO
                 print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
+                
+                # Mappa con possibili nomi per il campo del Nome Cliente su Airtable
+                candidate_name_fields = ["Cliente", "Nome e Cognome", "Nominativo", "Intestatario"]
+                
                 raw_fields = {
-                    "Nome": nome_clean,
                     "Codice Fiscale": cf_clean,
                     "cl_datanascita": data_nas,
                     "cl_indirizzo": residenza,
@@ -449,9 +439,11 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     "Stato Bot Estrazione": "Dati Estratti"
                 }
 
+                if nome_clean:
+                    raw_fields["Cliente"] = nome_clean
+
                 cleaned_fields = {k: v for k, v in raw_fields.items() if v != ""}
 
-                # Loop di retry dinamico: rimuove automaticamente i nomi di campo rifiutati da Airtable
                 while True:
                     res = requests.patch(url_trattativa, headers=headers, json={"fields": cleaned_fields})
                     if res.status_code == 200:
@@ -466,13 +458,23 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                         
                         if unk_match:
                             bad_field = unk_match.group(1)
-                            print(f"Campo '{bad_field}' non presente su Airtable. Rimuovo e riprovo...", flush=True)
-                            cleaned_fields.pop(bad_field, None)
+                            print(f"Campo '{bad_field}' non presente su Airtable.", flush=True)
+                            
+                            # Se fallisce il nome, prova la candidatura successiva
+                            if bad_field in candidate_name_fields or bad_field == "Nome":
+                                cleaned_fields.pop(bad_field, None)
+                                if candidate_name_fields and nome_clean:
+                                    next_name_field = candidate_name_fields.pop(0)
+                                    print(f"Riprovo con il campo nome alternativo: '{next_name_field}'...", flush=True)
+                                    cleaned_fields[next_name_field] = nome_clean
+                            else:
+                                print(f"Rimuovo campo non riconosciuto '{bad_field}' e riprovo...", flush=True)
+                                cleaned_fields.pop(bad_field, None)
                         elif opt_match and "Alimentazione" in cleaned_fields:
-                            print("Opzione 'Alimentazione' non compatibile con Single-Select Airtable. Rimuovo e riprovo...", flush=True)
+                            print("Opzione 'Alimentazione' non compatibile. Rimuovo e riprovo...", flush=True)
                             cleaned_fields.pop("Alimentazione", None)
                         else:
-                            print("Ripristino payload essenziale per salvare il record...", flush=True)
+                            print("Ripristino payload essenziale per salvare la riga...", flush=True)
                             cleaned_fields = {"Stato Bot Estrazione": "Dati Estratti"}
                     else:
                         res.raise_for_status()
