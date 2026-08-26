@@ -233,27 +233,40 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 prosegui_btn = target_frame.locator('input[value*="Prosegui" i], button:has-text("Prosegui"), a:has-text("Prosegui")').first
                 await prosegui_btn.click()
 
-                # 3. DUMP E SCANSIONE TESTUALE REGEX
-                print("Attesa elaborazione preventivo e apertura schede...", flush=True)
-                await page.wait_for_timeout(8000)
+                # 3. ATTESA DINAMICA RISULTATI PREVENTIVO
+                print("Attesa calcolo ed elaborazione del Preventivo (fino a 40s)...", flush=True)
+                result_frame = None
+                for _ in range(40):
+                    for frame in page.frames:
+                        try:
+                            if await frame.locator('text=/GARANZIE E SERVIZI|DATI ASSICURATIVI|POSIZIONE ASSICURATIVA/i').count() > 0:
+                                result_frame = frame
+                                break
+                        except Exception:
+                            continue
+                    if result_frame:
+                        break
+                    await asyncio.sleep(1)
 
-                # Apertura forzata di tutte le schede
-                for frame in page.frames:
-                    try:
-                        for tab_name in ["DATI ASSICURATIVI", "Figure contrattuali", "Posizione assicurativa", "Veicolo"]:
-                            t = frame.locator(f'text="{tab_name}"').first
-                            if await t.is_visible():
+                if result_frame:
+                    print("RISULTATI PREVENTIVO RILEVATI! Apertura schede...", flush=True)
+                    for tab_name in ["DATI ASSICURATIVI", "Figure contrattuali", "Posizione assicurativa", "Veicolo"]:
+                        try:
+                            t = result_frame.locator(f'text="{tab_name}"').first
+                            if await t.is_visible(timeout=1000):
                                 await t.click(force=True)
-                                await page.wait_for_timeout(1000)
-                    except Exception:
-                        continue
+                                await page.wait_for_timeout(1200)
+                        except Exception:
+                            continue
+                else:
+                    print("ATTENZIONE: Pagina risultati non rilevata in tempo, eseguo comunque il dump...", flush=True)
 
                 # Cattura e stampa a terminale del Dump Testuale
                 print("Cattura del dump testuale completo...", flush=True)
                 testo_completo = await cattura_testo_globale(page)
 
                 print("\n==================== STAMPA DUMP TESTO UNIPOL ====================", flush=True)
-                print(testo_completo[:3500], flush=True) # Stampa fino a 3500 caratteri nei log di Render
+                print(testo_completo[:3500], flush=True)
                 print("===================================================================\n", flush=True)
 
                 # Regex universali di estrazione
@@ -290,7 +303,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     "Data immatricolazione": data_immat.strip(),
                     "Alimentazione": alimentazione.strip(),
                     "Classe CU": classe_cu.strip(),
-                    "Compagnia Provenienza": provincia_o_compagnia if (provincia_o_compagnia := compagnia_provenienza.strip()) else "",
+                    "Compagnia Provenienza": compagnia_provenienza.strip(),
                     "Stato Bot Estrazione": "Dati Estratti"
                 }
 
