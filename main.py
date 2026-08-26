@@ -103,47 +103,45 @@ async def clicca_tab_nativo(page, target_frame, nome_tab: str) -> bool:
                 continue
     return False
 
-async def converti_input_in_testo_visibile(page) -> str:
-    """Trasforma tutti i campi input e select in nodi di testo visibili nel DOM (simulando la modalità Stampa)."""
+async def appiattisci_dom_ed_estrai_testo(page) -> str:
+    """Sostituisce gli input e i menu a tendina con il solo valore selezionato, eliminando le liste di opzioni."""
     testo_aggregato = []
     for frame in page.frames:
         try:
             dump = await frame.evaluate('''() => {
-                // Converte input e select in testo visibile affiancato
-                const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
-                inputs.forEach(i => {
-                    let val = '';
-                    if (i.tagName.toLowerCase() === 'select') {
-                        if (i.selectedIndex >= 0 && i.options[i.selectedIndex]) {
-                            val = i.options[i.selectedIndex].text || i.value || '';
-                        }
-                    } else {
-                        val = i.value || i.getAttribute('value') || '';
+                // 1. Sostituisce i tag <select> con il SOLO testo selezionato
+                document.querySelectorAll('select').forEach(s => {
+                    let selText = "";
+                    if (s.selectedIndex >= 0 && s.options[s.selectedIndex]) {
+                        selText = s.options[s.selectedIndex].text || "";
                     }
-                    val = (val || '').trim();
-                    if (val && val !== '125' && !val.includes('javax.faces') && val.length < 150) {
-                        const span = document.createElement('span');
-                        span.innerText = ' ' + val + ' ';
-                        if (i.parentNode) {
-                            i.parentNode.insertBefore(span, i.nextSibling);
-                        }
-                    }
+                    if (selText.toLowerCase().includes('seleziona')) selText = "";
+                    const span = document.createElement('span');
+                    span.innerText = " " + selText.trim() + " ";
+                    if (s.parentNode) s.parentNode.replaceChild(span, s);
                 });
 
-                // Converte menu PrimeFaces
-                const pfLabels = Array.from(document.querySelectorAll('.ui-selectonemenu-label, .ui-selectonemenu-title'));
-                pfLabels.forEach(pf => {
-                    let txt = (pf.innerText || pf.textContent || '').trim();
-                    if (txt && !txt.toLowerCase().includes('seleziona')) {
-                        const span = document.createElement('span');
-                        span.innerText = ' ' + txt + ' ';
-                        if (pf.parentNode) {
-                            pf.parentNode.insertBefore(span, pf.nextSibling);
-                        }
-                    }
+                // 2. Sostituisce i menu PrimeFaces
+                document.querySelectorAll('.ui-selectonemenu').forEach(menu => {
+                    const lbl = menu.querySelector('.ui-selectonemenu-label, .ui-selectonemenu-title');
+                    let txt = lbl ? (lbl.innerText || lbl.textContent || '').trim() : '';
+                    if (txt.toLowerCase().includes('seleziona')) txt = "";
+                    const span = document.createElement('span');
+                    span.innerText = " " + txt + " ";
+                    if (menu.parentNode) menu.parentNode.replaceChild(span, menu);
                 });
 
-                return document.body ? document.body.innerText : '';
+                // 3. Sostituisce gli <input> con il loro .value reale
+                document.querySelectorAll('input').forEach(i => {
+                    let val = i.value || i.getAttribute('value') || '';
+                    val = val.trim();
+                    if (val === '125' || val.includes('javax.faces')) val = "";
+                    const span = document.createElement('span');
+                    span.innerText = " " + val + " ";
+                    if (i.parentNode) i.parentNode.replaceChild(span, i);
+                });
+
+                return document.body ? document.body.innerText : "";
             }''')
             if dump and dump.strip():
                 testo_aggregato.append(dump)
@@ -342,7 +340,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 print("Invio form maschera con clic su Prosegui...", flush=True)
                 await invia_form_prosegui(page, target_frame)
 
-                # 3. ATTESA RISULTATI E CONVERSIONE TESTO STAMPA
+                # 3. ATTESA RISULTATI E SCANSIONE CON APPIATTIMENTO DOM
                 print("Attesa calcolo ed elaborazione del Preventivo (fino a 40s)...", flush=True)
                 result_frame = None
                 for _ in range(40):
@@ -360,25 +358,25 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 if not result_frame:
                     result_frame = target_frame
 
-                print("RISULTATI PREVENTIVO RILEVATI! Apertura ed iniezione nodi di testo...", flush=True)
+                print("RISULTATI PREVENTIVO RILEVATI! Lettura ed appiattimento schede...", flush=True)
 
+                testo_completo = ""
                 schede = ["DATI ASSICURATIVI", "Veicolo/natante", "Figure contrattuali", "Posizione assicurativa"]
+                
                 for tab in schede:
                     print(f"Apertura scheda: '{tab}'...", flush=True)
                     await clicca_tab_nativo(page, result_frame, tab)
-                    await page.wait_for_timeout(2000)
+                    await page.wait_for_timeout(2500) # Attesa carica AJAX
+                    testo_completo += "\n" + await appiattisci_dom_ed_estrai_testo(page)
 
-                print("Iniezione nodi visibili ed estrazione testo tipo Stampa...", flush=True)
-                testo_completo = await converti_input_in_testo_visibile(page)
-
-                print("\n================ DUMP TESTO CON VALORI INIETTATI ================", flush=True)
+                print("\n================ DUMP TESTO APPIATTITO CLEAN ================", flush=True)
                 print(testo_completo[:3000], flush=True)
-                print("===================================================================\n", flush=True)
+                print("=================================================================\n", flush=True)
 
-                # Estrazione con Regex dai nodi iniettati
+                # Estrazione tramite Regex dal testo appiattito
                 cf = estrai_con_regex(r"\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b", testo_completo)
                 
-                nome = estrai_con_regex(r"(?:Cod\.?Fisc/P\.IVA|C\.F\.)\s+[A-Z0-9]{16}\s+([A-Z\s\']+?)\s+(?:Data di nascita|Sesso)", testo_completo)
+                nome = estrai_con_regex(r"(?:Cod\.?Fisc/P\.IVA|C\.F\.)\s+[A-Z0-9]{16}\s+([A-Z\s\']+?)(?=\s+Data|\s+Sesso|\n|$)", testo_completo)
                 if not nome:
                     nome = estrai_con_regex(r"(?:Nominativo|PROPRIETARIO|Cliente)\s+([A-Z\s\']+?)(?=\s+Cod\.?Fisc|\s+Data|\s+C\.F\.|\n|$)", testo_completo)
                 
@@ -417,13 +415,10 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 print(f"VALORI REALI ESTRATTI -> Nome: '{nome_clean}', CF: '{cf_clean}', Marca: '{marca_clean}', Modello: '{modello_clean}', CU: '{classe_cu}', Compagnia: '{compagnia_clean}'", flush=True)
 
-                # 4. SALVATAGGIO SU AIRTABLE CON RETRY DINAMICO PER NOMI DI CAMPO
+                # 4. SALVATAGGIO SU AIRTABLE CON MAPPATURA RETRY AUTOMATICA
                 print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
                 
-                # Mappa con possibili nomi per il campo del Nome Cliente su Airtable
-                candidate_name_fields = ["Cliente", "Nome e Cognome", "Nominativo", "Intestatario"]
-                
-                raw_fields = {
+                cleaned_fields = {
                     "Codice Fiscale": cf_clean,
                     "cl_datanascita": data_nas,
                     "cl_indirizzo": residenza,
@@ -439,10 +434,11 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     "Stato Bot Estrazione": "Dati Estratti"
                 }
 
+                # Cerca di abbinare il nome al campo esatto presente su Airtable
                 if nome_clean:
-                    raw_fields["Cliente"] = nome_clean
+                    cleaned_fields["Nome"] = nome_clean
 
-                cleaned_fields = {k: v for k, v in raw_fields.items() if v != ""}
+                cleaned_fields = {k: v for k, v in cleaned_fields.items() if v != ""}
 
                 while True:
                     res = requests.patch(url_trattativa, headers=headers, json={"fields": cleaned_fields})
@@ -454,28 +450,14 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                         print(f"Rilevato errore campo Airtable 422 ({err_text}), sanificazione automatica...", flush=True)
                         
                         unk_match = re.search(r'Unknown field name:\s*\\?"([^\\"]+)\\?"', err_text)
-                        opt_match = re.search(r'create new select option', err_text, re.IGNORECASE)
                         
                         if unk_match:
                             bad_field = unk_match.group(1)
-                            print(f"Campo '{bad_field}' non presente su Airtable.", flush=True)
-                            
-                            # Se fallisce il nome, prova la candidatura successiva
-                            if bad_field in candidate_name_fields or bad_field == "Nome":
-                                cleaned_fields.pop(bad_field, None)
-                                if candidate_name_fields and nome_clean:
-                                    next_name_field = candidate_name_fields.pop(0)
-                                    print(f"Riprovo con il campo nome alternativo: '{next_name_field}'...", flush=True)
-                                    cleaned_fields[next_name_field] = nome_clean
-                            else:
-                                print(f"Rimuovo campo non riconosciuto '{bad_field}' e riprovo...", flush=True)
-                                cleaned_fields.pop(bad_field, None)
-                        elif opt_match and "Alimentazione" in cleaned_fields:
-                            print("Opzione 'Alimentazione' non compatibile. Rimuovo e riprovo...", flush=True)
-                            cleaned_fields.pop("Alimentazione", None)
+                            print(f"Campo '{bad_field}' non presente su Airtable. Rimuovo e riprovo...", flush=True)
+                            cleaned_fields.pop(bad_field, None)
                         else:
-                            print("Ripristino payload essenziale per salvare la riga...", flush=True)
-                            cleaned_fields = {"Stato Bot Estrazione": "Dati Estratti"}
+                            cleaned_fields.pop("Alimentazione", None)
+                            cleaned_fields.pop("cl_cap", None)
                     else:
                         res.raise_for_status()
                         break
