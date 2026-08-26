@@ -47,7 +47,7 @@ async def get_val_from_any_frame(page, keywords: list) -> str:
                 continue
     return ""
 
-async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
+async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: str):
     async with bot_semaphore:
         headers = {
             "Authorization": f"Bearer {AIRTABLE_API_KEY}",
@@ -58,7 +58,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
         targa_spazi = formatta_targa_spazi(targa)
         targa_pulita = targa.replace(" ", "").upper()
 
-        print(f"[{record_id}] Avvio elaborazione per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
+        print(f"[{record_id}] Avvio elaborazione ESCLUSIVA PREVENTIVATORE per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
         requests.patch(
             url_trattativa,
             headers=headers,
@@ -83,14 +83,14 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             )
 
-            # Blocco risorse grafiche pesanti anti-OOM crash
+            # Blocco risorse grafiche pesanti per mantenere RAM bassissima
             await context.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
 
             page = await context.new_page()
 
             try:
                 # ==========================================
-                # 🔒 ZONA IN CASSAFORTE (LOGIN & MFA)
+                # 🔒 1. LOGIN & MFA
                 # ==========================================
                 print("1/4 Inserimento Username e Password...", flush=True)
                 await page.goto("https://essig.unipolsai.it/my-policy", wait_until="commit", timeout=40000)
@@ -138,17 +138,15 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 try:
                     await page.goto(leonardo_url, wait_until="commit", timeout=20000)
                 except Exception as e:
-                    print(f"Interferenza di rete ({e}), proseguo sulla pagina corrente...", flush=True)
+                    print(f"Interferenza di rete ({e}), proseguo...", flush=True)
 
                 await page.wait_for_timeout(4000)
-                print(f"Atterraggio completato su: {page.url}", flush=True)
 
                 # ==========================================
-                # 🔓 MODULO 1: PREVENTIVATORE UNIPOL (FASE A)
+                # 🔓 2. PREVENTIVATORE UNIPOL
                 # ==========================================
                 print("Ingresso nel Preventivatore Unipol...", flush=True)
                 
-                # Clic dinamico multi-frame su PRODOTTI
                 prodotti_clicked = False
                 for _ in range(20):
                     for frame in [page.main_frame] + page.frames:
@@ -224,10 +222,13 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 prosegui_btn = target_frame.locator('input[value*="Prosegui" i], button:has-text("Prosegui"), a:has-text("Prosegui")').first
                 await prosegui_btn.click()
 
-                print("Attesa elaborazione risultati Preventivo...", flush=True)
+                # ==========================================
+                # 📊 3. ESTRAZIONE DATI DAL PREVENTIVATORE
+                # ==========================================
+                print("Attesa calcolo ed elaborazione risultati del Preventivo (fino a 40s)...", flush=True)
                 
                 result_frame = None
-                for _ in range(35):
+                for _ in range(40):
                     for frame in page.frames:
                         try:
                             if await frame.locator('text=/GARANZIE E SERVIZI|DATI ASSICURATIVI/i').count() > 0:
@@ -244,9 +245,9 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 classe_cu, compagnia_provenienza = "", ""
 
                 if result_frame:
-                    print("INGRESSO CONFERMATO NEL PREVENTIVO! Navigazione schede...", flush=True)
+                    print("INGRESSO NEL PREVENTIVO RIUSCITO! Estrazione schede...", flush=True)
                     
-                    # 1. Scheda DATI ASSICURATIVI
+                    # --- Scheda 1: DATI ASSICURATIVI / Veicolo ---
                     tab_dati = result_frame.locator('text="DATI ASSICURATIVI"').first
                     if await tab_dati.is_visible():
                         await tab_dati.click(force=True)
@@ -263,7 +264,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     data_immat = await get_val_from_any_frame(page, ["Data prima immatricolazione"])
                     alimentazione = await get_val_from_any_frame(page, ["Alimentazione"])
 
-                    # 2. Scheda Figure contrattuali
+                    # --- Scheda 2: Figure contrattuali ---
                     sub_fig = result_frame.locator('text="Figure contrattuali"').first
                     if await sub_fig.is_visible():
                         await sub_fig.click(force=True)
@@ -276,7 +277,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     prov = await get_val_from_any_frame(page, ["Prov"])
                     cap = await get_val_from_any_frame(page, ["CAP"])
 
-                    # 3. Scheda Posizione assicurativa
+                    # --- Scheda 3: Posizione assicurativa ---
                     sub_pos = result_frame.locator('text="Posizione assicurativa"').first
                     if await sub_pos.is_visible():
                         await sub_pos.click(force=True)
@@ -285,77 +286,12 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                     classe_cu = await get_val_from_any_frame(page, ["Classe CU di assegnazione", "Classe CU"])
                     compagnia_provenienza = await get_val_from_any_frame(page, ["Compagnia di provenienza", "Impresa"])
 
-                # ==========================================
-                # 🔓 MODULO 2: CONSULTAZIONE BDA ANIA (FASE B)
-                # ==========================================
-                print("Passaggio al Modulo BDA per Storia Assicurativa...", flush=True)
-                
-                try:
-                    str_check = page.get_by_text("Strumenti", exact=True).first
-                    if not await str_check.is_visible(timeout=1500):
-                        await page.goto(leonardo_url, wait_until="commit", timeout=12000)
-                except Exception:
-                    pass
-
-                await page.wait_for_timeout(1500)
-
-                await page.get_by_text("Strumenti", exact=True).first.click(force=True)
-                await page.wait_for_timeout(1000)
-                await page.get_by_text("Danni", exact=True).first.click(force=True)
-                await page.wait_for_timeout(1000)
-                await page.get_by_text("RCA AUTO", exact=True).first.click(force=True)
-                await page.wait_for_timeout(1000)
-                await page.get_by_text("CONSULTAZIONE BDA", exact=True).first.click(force=True)
-                await page.wait_for_timeout(3000)
-
-                print(f"Inserimento targa {targa_pulita} in BDA...", flush=True)
-                for frame in page.frames:
-                    try:
-                        inp = frame.locator('input[name*="targa" i]:enabled, input[id*="targa" i]:enabled').first
-                        if await inp.is_visible(timeout=500):
-                            await inp.fill(targa_pulita)
-                            btn = frame.locator('button:has-text("Avanti"), input[value*="Avanti" i]').first
-                            await btn.click()
-                            break
-                    except Exception:
-                        continue
-
-                await page.wait_for_timeout(3000)
-
-                # Fallback dati Veicolo da BDA se mancanti
-                for _ in range(8):
-                    if not marca: marca = await get_val_from_any_frame(page, ["Marca:"])
-                    if not modello: modello = await get_val_from_any_frame(page, ["Descrizione modello:"])
-                    if not kw: kw = await get_val_from_any_frame(page, ["KW:"])
-                    if not data_immat: data_immat = await get_val_from_any_frame(page, ["Data prima immatricolazione:"])
-                    if not alimentazione: alimentazione = await get_val_from_any_frame(page, ["Alimentazione:"])
-                    if marca or kw: break
-                    await asyncio.sleep(1)
-
-                # Clic su Visualizza Attestato in BDA
-                for frame in page.frames:
-                    try:
-                        btn_att = frame.locator('button:has-text("Visualizza Attestato"), input[value*="Attestato" i]').first
-                        if await btn_att.is_visible(timeout=500):
-                            await btn_att.click()
-                            await page.wait_for_timeout(2000)
-                            break
-                    except Exception:
-                        continue
-
-                # Fallback CU e Compagnia da BDA se mancanti
-                for _ in range(8):
-                    if not classe_cu: classe_cu = await get_val_from_any_frame(page, ["Classe CU di assegnazione:", "Classe CU:"])
-                    if not compagnia_provenienza: compagnia_provenienza = await get_val_from_any_frame(page, ["Impresa:", "Compagnia di provenienza"])
-                    if classe_cu: break
-                    await asyncio.sleep(1)
-
-                print(f"VALORI FINALI ESTRATTI -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
+                print(f"VALORI ESTRATTI DAL PREVENTIVATORE -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
 
                 # ==========================================
-                # 💾 SALVATAGGIO FINALE SU AIRTABLE
+                # 💾 4. SALVATAGGIO FINALE SU AIRTABLE
                 # ==========================================
-                print("Mappatura e Salvataggio dei dati completi su Airtable...", flush=True)
+                print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
                 raw_fields = {
                     "Nome": nome.strip(),
                     "Codice Fiscale": cf.strip(),
@@ -380,7 +316,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 if res.status_code != 200:
                     print(f"Risposta Error Airtable: {res.text}", flush=True)
                 res.raise_for_status()
-                print(f"[{record_id}] ESTRAZIONE E MAPPATURA COMPLETATE CON SUCCESSO!", flush=True)
+                print(f"[{record_id}] ESTRAZIONE PREVENTIVATORE COMPLETATA CON SUCCESSO!", flush=True)
 
             except Exception as e:
                 err_msg = str(e)[:250]
@@ -401,5 +337,5 @@ async def trigger_bot(data: dict, background_tasks: BackgroundTasks):
     targa = data.get("targa")
     data_nascita = data.get("data_nascita")
     
-    background_tasks.add_task(estrai_dati_bda, record_id, targa, data_nascita)
-    return {"status": "Doppia Estrazione Avviata", "record_id": record_id}
+    background_tasks.add_task(estrai_dati_preventivatore, record_id, targa, data_nascita)
+    return {"status": "Estrazione Preventivatore Avviata", "record_id": record_id}
