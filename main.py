@@ -25,7 +25,6 @@ def formatta_targa_spazi(targa_raw: str) -> str:
     return clean
 
 async def click_elemento_dinamico(page, testo: str, max_tentativi=20) -> bool:
-    """Cerca un testo o un pulsante su TUTTI gli iframe della pagina ed esegue il clic."""
     for _ in range(max_tentativi):
         for frame in [page.main_frame] + page.frames:
             try:
@@ -39,7 +38,6 @@ async def click_elemento_dinamico(page, testo: str, max_tentativi=20) -> bool:
     return False
 
 async def invia_form_prosegui(page, target_frame) -> bool:
-    """Invio form a 3 livelli per superare i blocchi PrimeFaces/JSF."""
     selectors = [
         'input[value*="Prosegui" i]',
         'button:has-text("Prosegui")',
@@ -83,62 +81,55 @@ async def invia_form_prosegui(page, target_frame) -> bool:
             continue
     return False
 
-async def cattura_testo_globale(page) -> str:
-    """Estrae sia il testo visibile sia il valore SELEZIONATO nei campi input/select di ogni iframe."""
-    testo_aggregato = []
+async def estrai_mappa_primefaces(page) -> dict:
+    """Mappa tutte le tabelle PrimeFaces/JSF associando ad ogni etichetta il suo valore reale visibile."""
+    mappa_dati = {}
     for frame in page.frames:
         try:
-            dump = await frame.evaluate('''() => {
-                let result = [];
-                if (document.body) {
-                    result.push("=== BODY TEXT ===");
-                    result.push(document.body.innerText);
-                }
-                result.push("=== INPUT & SELECT VALUES ===");
-                const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
-                inputs.forEach(i => {
-                    let val = "";
-                    if (i.tagName.toLowerCase() === 'select') {
-                        if (i.selectedIndex >= 0 && i.options[i.selectedIndex]) {
-                            val = i.options[i.selectedIndex].text || "";
+            dati_frame = await frame.evaluate('''() => {
+                let res = {};
+                const rows = Array.from(document.querySelectorAll('tr'));
+                rows.forEach(r => {
+                    const cells = Array.from(r.querySelectorAll('td, th'));
+                    if (cells.length >= 2) {
+                        for (let i = 0; i < cells.length - 1; i += 2) {
+                            let label = cells[i].innerText ? cells[i].innerText.trim().replace(/[:*]/g, '') : '';
+                            let valCell = cells[i+1];
+                            if (label && valCell) {
+                                // Se la cella contiene un menu a tendina PrimeFaces
+                                let pfLabel = valCell.querySelector('.ui-selectonemenu-label, .ui-selectonemenu-title');
+                                let inputEl = valCell.querySelector('input:not([type="hidden"]), select');
+                                let val = '';
+                                if (pfLabel && pfLabel.innerText) {
+                                    val = pfLabel.innerText;
+                                } else if (inputEl && inputEl.value) {
+                                    val = inputEl.value;
+                                } else {
+                                    val = valCell.innerText;
+                                }
+                                if (val) {
+                                    res[label] = val.trim();
+                                }
+                            }
                         }
-                    } else {
-                        val = i.value || "";
-                    }
-                    val = val.trim();
-                    if (val !== "" && val !== "125" && !val.includes("=== ")) {
-                        let name = i.name || i.id || "";
-                        let closestTd = i.closest('td');
-                        let label = "";
-                        if (closestTd && closestTd.previousElementSibling) {
-                            label = closestTd.previousElementSibling.innerText.trim();
-                        }
-                        result.push(`[FIELD] ${label} (${name}) => ${val}`);
                     }
                 });
-                return result.join("\\n");
+                return res;
             }''')
-            if dump and dump.strip():
-                testo_aggregato.append(dump)
+            if dati_frame:
+                mappa_dati.update(dati_frame)
         except Exception:
             continue
-    return "\n--- FRAME SEPARATOR ---\n".join(testo_aggregato)
+    return mappa_dati
 
-def estrai_con_regex(pattern: str, testo: str, default: str = "") -> str:
-    m = re.search(pattern, testo, re.IGNORECASE | re.MULTILINE)
-    if m and m.group(1):
-        v = m.group(1).strip()
-        return v if v != "125" else default
-    return default
-
-def pulisci_campo_airtable(valore: str, scarti: list) -> str:
-    """Evita l'invio di testi di default o stringhe multilinea su Airtable."""
-    if not valore:
-        return ""
-    v = valore.strip()
-    if v in scarti or "\n" in v or len(v) > 100:
-        return ""
-    return v
+def cerca_in_mappa(mappa: dict, chiavi: list) -> str:
+    for k_map, v_map in mappa.items():
+        for k_cerca in chiavi:
+            if k_cerca.lower() in k_map.lower():
+                # Filtra le descrizioni generiche o le liste multilinea
+                if v_map and "\n" not in v_map and v_map.lower() not in ["cerca", "seleziona", "ui-button"]:
+                    return v_map.strip()
+    return ""
 
 async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: str):
     async with bot_semaphore:
@@ -151,7 +142,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
         targa_spazi = formatta_targa_spazi(targa)
         targa_pulita = targa.replace(" ", "").upper()
 
-        print(f"[{record_id}] Avvio DUMP TESTUALE per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
+        print(f"[{record_id}] Avvio estrazione chirurgica PrimeFaces per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
         requests.patch(
             url_trattativa,
             headers=headers,
@@ -315,7 +306,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 print("Invio form maschera con clic su Prosegui...", flush=True)
                 await invia_form_prosegui(page, target_frame)
 
-                # 3. ATTESA DINAMICA RISULTATI PREVENTIVO
+                # 3. ATTESA DINAMICA E SCANSIONE MAPPATA DELLE SCHEDE
                 print("Attesa calcolo ed elaborazione del Preventivo (fino a 40s)...", flush=True)
                 result_frame = None
                 for _ in range(40):
@@ -330,75 +321,78 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                         break
                     await asyncio.sleep(1)
 
+                mappa_totale = {}
+
                 if result_frame:
-                    print("RISULTATI PREVENTIVO RILEVATI! Apertura sequenziale delle schede AJAX...", flush=True)
+                    print("RISULTATI PREVENTIVO RILEVATI! Lettura schede...", flush=True)
                     
-                    # Clic guidato con pause di caricamento AJAX su ciascun tab
-                    for tab_name in ["DATI ASSICURATIVI", "Veicolo/natante", "Figure contrattuali", "Posizione assicurativa"]:
+                    for tab_name in ["DATI ASSICURATIVI", "Figure contrattuali", "Posizione assicurativa"]:
                         try:
                             t = result_frame.locator(f'text="{tab_name}"').first
-                            if await t.is_visible(timeout=1500):
-                                print(f"Apertura scheda: {tab_name}...", flush=True)
+                            if await t.is_visible(timeout=2000):
+                                print(f"Caricamento ed estrazione scheda: {tab_name}...", flush=True)
                                 await t.click(force=True)
-                                await page.wait_for_timeout(2500) # Attesa rendering AJAX
+                                await page.wait_for_timeout(2500) # Attesa scaricamento AJAX
+                                # Aggiorna la mappa con le coppie Label-Valore della scheda corrente
+                                mappa_scheda = await estrai_mappa_primefaces(page)
+                                mappa_totale.update(mappa_scheda)
                         except Exception:
                             continue
                 else:
-                    print("ATTENZIONE: Pagina risultati non rilevata in tempo, eseguo comunque il dump...", flush=True)
+                    print("ATTENZIONE: Pagina risultati non rilevata in tempo, provo comunque la mappatura...", flush=True)
+                    mappa_totale = await estrai_mappa_primefaces(page)
 
-                # Cattura e stampa del Dump Testuale
-                print("Cattura del dump testuale completo...", flush=True)
-                testo_completo = await cattura_testo_globale(page)
+                print("\n================ MAPPA DATI ESTRATTI PRIMEFACES ================", flush=True)
+                for k, v in list(mappa_totale.items())[:20]:
+                    print(f"  [{k}] => {v}", flush=True)
+                print("=================================================================\n", flush=True)
 
-                print("\n==================== STAMPA DUMP TESTO UNIPOL ====================", flush=True)
-                print(testo_completo[:3500], flush=True)
-                print("===================================================================\n", flush=True)
-
-                # Regex universali di estrazione
-                cf = estrai_con_regex(r"\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b", testo_completo)
-                nome = estrai_con_regex(r"(?:Nominativo|PROPRIETARIO|Cliente)\s*[:=>\n\-]+\s*([A-Z\s\']+)", testo_completo)
-                data_nas = estrai_con_regex(r"(?:Data di nascita|Nato il)\s*[:=>\n\-]+\s*(\d{2}/\d{2}/\d{4})", testo_completo)
-                residenza = estrai_con_regex(r"(?:Indirizzo|Residenza)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
-                prov = estrai_con_regex(r"(?:Prov|Provincia)\s*[:=>\n\-]+\s*([A-Z]{2})\b", testo_completo)
+                # Estrazione chirurgica dalle coppie Label-Valore
+                cf = cerca_in_mappa(mappa_totale, ["Cod.Fisc", "C.F.", "Codice Fiscale"])
+                nome = cerca_in_mappa(mappa_totale, ["Nominativo", "Proprietario", "Cliente"])
+                data_nas = cerca_in_mappa(mappa_totale, ["Data di nascita", "Nato il"])
+                residenza = cerca_in_mappa(mappa_totale, ["Indirizzo", "Residenza"])
+                prov = cerca_in_mappa(mappa_totale, ["Prov", "Provincia"])
                 
-                marca = estrai_con_regex(r"(?:Codice marca|Marca)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
-                modello = estrai_con_regex(r"(?:Descrizione modello|Modello)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
-                kw = estrai_con_regex(r"\bKW\s*[:=>\n\-]+\s*(\d+(?:[.,]\d+)?)", testo_completo)
-                data_immat = estrai_con_regex(r"(?:Data prima immatricolazione|Immatricolazione)\s*[:=>\n\-]+\s*(\d{2}/\d{2}/\d{4})", testo_completo)
-                alimentazione_raw = estrai_con_regex(r"(?:Alimentazione)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
+                marca = cerca_in_mappa(mappa_totale, ["Codice marca", "Marca"])
+                modello = cerca_in_mappa(mappa_totale, ["Descrizione modello", "Modello"])
+                kw = cerca_in_mappa(mappa_totale, ["KW"])
+                data_immat = cerca_in_mappa(mappa_totale, ["Data prima immatricolazione", "Immatricolazione"])
+                alimentazione_raw = cerca_in_mappa(mappa_totale, ["Alimentazione"])
                 
-                # Normalizzazione Alimentazione
+                # Normalizzazione Alimentazione per Airtable Single-Select
                 alimentazione = ""
-                for p in ["BENZINA", "DIESEL", "ELETTRICA", "GPL", "IBRIDA", "METANO"]:
-                    if p in alimentazione_raw.upper():
-                        alimentazione = p
-                        break
+                if "BENZINA" in alimentazione_raw.upper():
+                    alimentazione = "Benzina"
+                elif "DIESEL" in alimentazione_raw.upper():
+                    alimentazione = "Diesel"
+                elif "GPL" in alimentazione_raw.upper():
+                    alimentazione = "GPL"
+                elif "METANO" in alimentazione_raw.upper():
+                    alimentazione = "Metano"
+                elif "ELETTRICA" in alimentazione_raw.upper() or "IBRIDA" in alimentazione_raw.upper():
+                    alimentazione = "Ibrida/Elettrica"
 
-                classe_cu = estrai_con_regex(r"(?:Classe CU|CU di assegnazione|CU)\s*[:=>\n\-]+\s*(\d+)", testo_completo)
-                compagnia_provenienza = estrai_con_regex(r"(?:Impresa|Compagnia di provenienza|Compagnia)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
+                classe_cu = cerca_in_mappa(mappa_totale, ["Classe CU di assegnazione", "Classe CU", "CU"])
+                compagnia_provenienza = cerca_in_mappa(mappa_totale, ["Compagnia di provenienza", "Impresa"])
 
-                # Pulizia valori da inviare ad Airtable
-                marca_clean = pulisci_campo_airtable(marca, ["Cerca", "Codice marca"])
-                modello_clean = pulisci_campo_airtable(modello, ["Descrizione modello", "Modello"])
-                compagnia_clean = pulisci_campo_airtable(compagnia_provenienza, ["Impresa", "Compagnia"])
-
-                print(f"VALORI PULITI ESTRATTI -> Nome: '{nome}', CF: '{cf}', Marca: '{marca_clean}', Modello: '{modello_clean}', Alimentazione: '{alimentazione}', CU: '{classe_cu}', Compagnia: '{compagnia_clean}'", flush=True)
+                print(f"VALORI REALI ESTRATTI -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', Alimentazione: '{alimentazione}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
 
                 # 4. SALVATAGGIO SU AIRTABLE
                 print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
                 raw_fields = {
-                    "Nome": nome.strip(),
-                    "Codice Fiscale": cf.strip(),
-                    "cl_datanascita": data_nas.strip(),
-                    "cl_indirizzo": residenza.strip(),
-                    "cl_provincia": prov.strip(),
-                    "Marca": marca_clean,
-                    "Modello": modello_clean,
-                    "KW": kw.strip(),
-                    "Data immatricolazione": data_immat.strip(),
+                    "Nome": nome,
+                    "Codice Fiscale": cf,
+                    "cl_datanascita": data_nas,
+                    "cl_indirizzo": residenza,
+                    "cl_provincia": prov,
+                    "Marca": marca,
+                    "Modello": modello,
+                    "KW": kw,
+                    "Data immatricolazione": data_immat,
                     "Alimentazione": alimentazione,
-                    "Classe CU": classe_cu.strip(),
-                    "Compagnia Provenienza": compagnia_clean,
+                    "Classe CU": classe_cu,
+                    "Compagnia Provenienza": compagnia_provenienza,
                     "Stato Bot Estrazione": "Dati Estratti"
                 }
 
