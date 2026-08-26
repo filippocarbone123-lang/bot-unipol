@@ -24,7 +24,8 @@ def formatta_targa_spazi(targa_raw: str) -> str:
         return f"{clean[:2]} {clean[2:5]} {clean[5:]}"
     return clean
 
-async def click_elemento_dinamico(page, testo: str, max_tentativi=20) -> bool:
+async def click_elemento_dinamico(page, testo: str, max_tentativi=15) -> bool:
+    """Cerca e clicca un testo o sotto-tab su TUTTI gli iframe della pagina."""
     for _ in range(max_tentativi):
         for frame in [page.main_frame] + page.frames:
             try:
@@ -81,60 +82,59 @@ async def invia_form_prosegui(page, target_frame) -> bool:
             continue
     return False
 
-async def estrai_campo_label(frame, keywords: list) -> str:
-    """Estrae il valore reale affiancato alle etichette nelle tabelle HTML/PrimeFaces."""
-    try:
-        valore = await frame.evaluate('''(kws) => {
-            const allElements = Array.from(document.querySelectorAll('td, th, label, span, div'));
-            for (let kw of kws) {
-                for (let el of allElements) {
-                    const text = (el.innerText || el.textContent || '').trim().toLowerCase();
-                    if (text === kw.toLowerCase() || (text.includes(kw.toLowerCase()) && text.length < 45)) {
-                        let cell = el.closest('td, th');
-                        let nextCell = cell ? cell.nextElementSibling : null;
+async def estrai_dati_globali(page) -> dict:
+    """Scansiona tutti gli iframe della pagina per estrarre la mappa completa di etichette e valori."""
+    risultato_globale = {}
+    for frame in page.frames:
+        try:
+            dati_frame = await frame.evaluate('''() => {
+                let res = {};
+                const cells = Array.from(document.querySelectorAll('td, th, label, .ui-outputlabel'));
+                cells.forEach(el => {
+                    let labelText = (el.innerText || el.textContent || '').trim().replace(/[:*]/g, '');
+                    if (labelText && labelText.length > 1 && labelText.length < 50) {
+                        let parentTd = el.closest('td, th');
+                        let targetTd = parentTd ? parentTd.nextElementSibling : null;
                         
-                        if (!nextCell && cell && cell.parentElement) {
-                            let tds = Array.from(cell.parentElement.querySelectorAll('td, th'));
-                            let idx = tds.indexOf(cell);
-                            if (idx >= 0 && idx + 1 < tds.length) {
-                                nextCell = tds[idx + 1];
-                            }
-                        }
-
-                        if (nextCell) {
-                            // 1. Cerca dentro Select o Input
-                            let inp = nextCell.querySelector('input:not([type="hidden"]), select, textarea');
-                            if (inp) {
-                                if (inp.tagName.toLowerCase() === 'select') {
-                                    let opt = inp.options[inp.selectedIndex];
-                                    if (opt && opt.text && opt.text.trim()) return opt.text.trim();
-                                }
-                                if (inp.value && inp.value.trim()) return inp.value.trim();
-                                let attrVal = inp.getAttribute('value');
-                                if (attrVal && attrVal.trim()) return attrVal.trim();
-                            }
-
-                            // 2. Componenti PrimeFaces (.ui-selectonemenu-label)
-                            let pfLabel = nextCell.querySelector('.ui-selectonemenu-label, .ui-selectonemenu-title');
+                        if (targetTd) {
+                            let val = '';
+                            let inputEl = targetTd.querySelector('input:not([type="hidden"]), select, textarea');
+                            let pfLabel = targetTd.querySelector('.ui-selectonemenu-label, .ui-selectonemenu-title');
+                            
                             if (pfLabel && pfLabel.innerText && pfLabel.innerText.trim()) {
-                                let t = pfLabel.innerText.trim();
-                                if (!t.toLowerCase().includes('seleziona')) return t;
+                                val = pfLabel.innerText.trim();
+                            } else if (inputEl) {
+                                if (inputEl.tagName.toLowerCase() === 'select') {
+                                    val = inputEl.options[inputEl.selectedIndex] ? inputEl.options[inputEl.selectedIndex].text : inputEl.value;
+                                } else {
+                                    val = inputEl.value || inputEl.getAttribute('value') || '';
+                                }
+                            } else {
+                                val = targetTd.innerText || targetTd.textContent || '';
                             }
-
-                            // 3. Testo semplice nella cella adiacente
-                            let cellText = (nextCell.innerText || nextCell.textContent || '').trim();
-                            if (cellText && cellText.toLowerCase() !== 'cerca' && cellText !== 'ui-button') {
-                                return cellText;
+                            
+                            val = val.trim();
+                            if (val && !val.toLowerCase().includes('cerca') && val !== 'ui-button' && !val.includes('=== ')) {
+                                res[labelText] = val;
                             }
                         }
                     }
-                }
-            }
-            return '';
-        }''', keywords)
-        return valore if valore else ""
-    except Exception:
-        return ""
+                });
+                return res;
+            }''')
+            if dati_frame:
+                risultato_globale.update(dati_frame)
+        except Exception:
+            continue
+    return risultato_globale
+
+def cerca_valore_mappa(mappa: dict, keywords: list) -> str:
+    for k_map, v_map in mappa.items():
+        for kw in keywords:
+            if kw.lower() in k_map.lower():
+                if v_map and "\n" not in v_map and v_map.lower() not in ["cerca", "seleziona", "ui-button"]:
+                    return v_map.strip()
+    return ""
 
 async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: str):
     async with bot_semaphore:
@@ -311,66 +311,78 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 print("Invio form maschera con clic su Prosegui...", flush=True)
                 await invia_form_prosegui(page, target_frame)
 
-                # 3. NAVIGAZIONE SCHEDE AJAX ED ESTRAZIONE
+                # 3. ATTESA RISULTATI E APERTURA APPOSITA SCHEDE AJAX
                 print("Attesa calcolo ed elaborazione del Preventivo (fino a 40s)...", flush=True)
-                result_frame = None
+                result_detected = False
                 for _ in range(40):
                     for frame in page.frames:
                         try:
                             if await frame.locator('text=/GARANZIE E SERVIZI|DATI ASSICURATIVI|POSIZIONE ASSICURATIVA/i').count() > 0:
-                                result_frame = frame
+                                result_detected = True
                                 break
                         except Exception:
                             continue
-                    if result_frame:
+                    if result_detected:
                         break
                     await asyncio.sleep(1)
 
-                data_immat, alimentazione, kw, marca, modello = "", "", "", "", ""
-                nome, cf, data_nas, residenza, cap, prov = "", "", "", "", "", ""
-                classe_cu, compagnia_provenienza = "", ""
+                mappa_totale = {}
 
-                if result_frame:
-                    print("RISULTATI PREVENTIVO RILEVATI! Lettura schede...", flush=True)
+                if result_detected:
+                    print("RISULTATI PREVENTIVO RILEVATI! Apertura progressiva dei tab AJAX...", flush=True)
+                    
+                    schede_da_aprire = [
+                        "DATI ASSICURATIVI",
+                        "Veicolo/natante",
+                        "Figure contrattuali",
+                        "Posizione assicurativa"
+                    ]
 
-                    # --- SCHEDA 1: DATI ASSICURATIVI / Veicolo ---
-                    tab_dati = result_frame.locator('text="DATI ASSICURATIVI"').first
-                    if await tab_dati.is_visible():
-                        await tab_dati.click(force=True)
-                        await page.wait_for_timeout(2000)
+                    for tab in schede_da_aprire:
+                        print(f"Clic su scheda: '{tab}'...", flush=True)
+                        clicked = await click_elemento_dinamico(page, tab, max_tentativi=10)
+                        if clicked:
+                            await page.wait_for_timeout(2500) # Attesa scaricamento AJAX della scheda
+                            dati_parziali = await estrai_dati_globali(page)
+                            mappa_totale.update(dati_parziali)
+                else:
+                    print("ATTENZIONE: Risultati non rilevati in tempo, provo estrazione diretta...", flush=True)
+                    mappa_totale = await estrai_dati_globali(page)
 
-                    sub_veic = result_frame.locator('text=/Veicolo/i').first
-                    if await sub_veic.is_visible():
-                        await sub_veic.click(force=True)
-                        await page.wait_for_timeout(2000)
+                print("\n================ MAPPA DATI ESTRATTI PRIMEFACES ================", flush=True)
+                for k, v in list(mappa_totale.items())[:25]:
+                    print(f"  [{k}] => {v}", flush=True)
+                print("=================================================================\n", flush=True)
 
-                    data_immat = await estrai_campo_label(result_frame, ["Data prima immatricolazione"])
-                    alimentazione = await estrai_campo_label(result_frame, ["Alimentazione"])
-                    kw = await estrai_campo_label(result_frame, ["KW"])
-                    marca = await estrai_campo_label(result_frame, ["Codice marca", "Marca"])
-                    modello = await estrai_campo_label(result_frame, ["Descrizione modello", "Modello"])
+                # Estrattore mirato
+                cf = cerca_valore_mappa(mappa_totale, ["Cod.Fisc/P.IVA", "Cod.Fisc", "C.F.", "Codice Fiscale"])
+                nome = cerca_valore_mappa(mappa_totale, ["Nominativo", "Proprietario", "Cliente"])
+                data_nas = cerca_valore_mappa(mappa_totale, ["Data di nascita", "Nato il"])
+                residenza = cerca_valore_mappa(mappa_totale, ["Indirizzo", "Residenza"])
+                prov = cerca_valore_mappa(mappa_totale, ["Prov", "Provincia"])
+                cap = cerca_valore_mappa(mappa_totale, ["CAP"])
+                
+                marca = cerca_valore_mappa(mappa_totale, ["Codice marca", "Marca"])
+                modello = cerca_valore_mappa(mappa_totale, ["Descrizione modello", "Modello"])
+                kw = cerca_valore_mappa(mappa_totale, ["KW"])
+                data_immat = cerca_valore_mappa(mappa_totale, ["Data prima immatricolazione", "Immatricolazione"])
+                alimentazione_raw = cerca_valore_mappa(mappa_totale, ["Alimentazione"])
+                
+                # Format per Single-Select Airtable
+                alimentazione = ""
+                if "BENZINA" in alimentazione_raw.upper():
+                    alimentazione = "Benzina"
+                elif "DIESEL" in alimentazione_raw.upper():
+                    alimentazione = "Diesel"
+                elif "GPL" in alimentazione_raw.upper():
+                    alimentazione = "GPL"
+                elif "METANO" in alimentazione_raw.upper():
+                    alimentazione = "Metano"
+                elif "ELETTRICA" in alimentazione_raw.upper() or "IBRIDA" in alimentazione_raw.upper():
+                    alimentazione = "Ibrida/Elettrica"
 
-                    # --- SCHEDA 2: Figure contrattuali ---
-                    sub_fig = result_frame.locator('text="Figure contrattuali"').first
-                    if await sub_fig.is_visible():
-                        await sub_fig.click(force=True)
-                        await page.wait_for_timeout(2500) # Attesa carica AJAX
-
-                    nome = await estrai_campo_label(result_frame, ["Nominativo", "PROPRIETARIO"])
-                    cf = await estrai_campo_label(result_frame, ["Cod.Fisc/P.IVA", "Cod.Fisc", "C.F"])
-                    data_nas = await estrai_campo_label(result_frame, ["Data di nascita"])
-                    residenza = await estrai_campo_label(result_frame, ["Indirizzo"])
-                    cap = await estrai_campo_label(result_frame, ["CAP"])
-                    prov = await estrai_campo_label(result_frame, ["Prov"])
-
-                    # --- SCHEDA 3: Posizione assicurativa ---
-                    sub_pos = result_frame.locator('text="Posizione assicurativa"').first
-                    if await sub_pos.is_visible():
-                        await sub_pos.click(force=True)
-                        await page.wait_for_timeout(2500) # Attesa carica AJAX
-
-                    classe_cu = await estrai_campo_label(result_frame, ["Classe CU di assegnazione", "Classe CU"])
-                    compagnia_provenienza = await estrai_campo_label(result_frame, ["Impresa", "Compagnia di provenienza"])
+                classe_cu = cerca_valore_mappa(mappa_totale, ["Classe CU di assegnazione", "Classe CU", "CU"])
+                compagnia_provenienza = cerca_valore_mappa(mappa_totale, ["Impresa", "Compagnia di provenienza"])
 
                 print(f"VALORI REALI ESTRATTI -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
 
@@ -398,7 +410,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 res = requests.patch(url_trattativa, headers=headers, json=payload_trattativa)
                 
-                # Se Airtable segnala un campo sconosciuto/invalido (es. cl_cap), lo rimuove e riprova
+                # Fallback in caso di opzione/campo non presente su Airtable
                 if res.status_code == 422:
                     print(f"Rilevato errore campo Airtable ({res.text}), riprovo senza campi opzionali...", flush=True)
                     err_txt = res.text
