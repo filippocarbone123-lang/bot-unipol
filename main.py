@@ -208,14 +208,27 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 print(f"Compilazione CIP (125) e Targa ('{targa_spazi}')...", flush=True)
                 
-                # Compilazione chirurgica dei campi mediante selettori specifici PrimeFaces
-                cip_input = target_frame.locator('input[id*="cSagPrp" i], input[name*="cSagPrp" i]').first
-                if await cip_input.count() > 0:
+                # Compilazione filtrando rigidamente solo campi di testo (evita checkbox/radio)
+                cip_input = target_frame.locator('input[type="text"][id*="cSagPrp" i], input[type="text"][name*="cSagPrp" i]').first
+                if await cip_input.count() > 0 and await cip_input.is_visible():
                     await cip_input.fill("125")
 
-                targa_input = target_frame.locator('input[id*="trg" i], input[name*="trg" i], td:has-text("Targa") + td input:enabled').first
-                if await targa_input.count() > 0:
+                targa_input = target_frame.locator('input[type="text"][id*="trg" i], input[type="text"][name*="trg" i], td:has-text("Targa") + td input[type="text"]:enabled').first
+                if await targa_input.count() > 0 and await targa_input.is_visible():
                     await targa_input.fill(targa_spazi)
+                else:
+                    # Fallback sui campi di testo editabili visibili
+                    inputs_editabili = []
+                    all_text_inputs = target_frame.locator('input[type="text"]')
+                    for i in range(await all_text_inputs.count()):
+                        inp = all_text_inputs.nth(i)
+                        if await inp.is_visible() and await inp.is_enabled():
+                            is_readonly = await inp.get_attribute("readonly") or await inp.get_attribute("aria-readonly")
+                            if not is_readonly or is_readonly == "false":
+                                inputs_editabili.append(inp)
+                    if len(inputs_editabili) >= 2:
+                        await inputs_editabili[0].fill("125")
+                        await inputs_editabili[1].fill(targa_spazi)
 
                 print("Invio form maschera con clic su Prosegui...", flush=True)
                 prosegui_btn = target_frame.locator('input[value*="Prosegui" i], button:has-text("Prosegui"), a:has-text("Prosegui")').first
@@ -275,7 +288,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 print(f"VALORI ESTRATTI CON DUMP -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
 
-                # 4. SALVATAGGIO SU AIRTABLE (Senza cl_cap per evitare errore 422)
+                # 4. SALVATAGGIO SU AIRTABLE
                 print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
                 raw_fields = {
                     "Nome": nome.strip(),
