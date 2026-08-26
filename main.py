@@ -65,113 +65,145 @@ async def invia_form_prosegui(page, target_frame) -> bool:
                 continue
     return False
 
-async def clicca_subtab(page, result_frame, nome_tab: str) -> bool:
+async def clicca_subtab(page, result_frame, nomi_tab: list) -> bool:
+    """Clicca direttamente la sotto-scheda cercando tra i possibili titoli."""
     frames = [result_frame] + [f for f in page.frames if f != result_frame]
     for frame in frames:
         if not frame:
             continue
-        for selector in [
-            f'a:has-text("{nome_tab}")',
-            f'button:has-text("{nome_tab}")',
-            f'span:has-text("{nome_tab}")',
-            f'td:has-text("{nome_tab}")',
-            f'text="{nome_tab}"'
-        ]:
-            try:
-                el = frame.locator(selector).first
-                if await el.is_visible(timeout=600):
-                    await el.click(force=True)
-                    return True
-            except Exception:
-                continue
+        for nome in nomi_tab:
+            for selector in [
+                f'a:has-text("{nome}")',
+                f'button:has-text("{nome}")',
+                f'span:has-text("{nome}")',
+                f'td:has-text("{nome}")',
+                f'text="{nome}"'
+            ]:
+                try:
+                    el = frame.locator(selector).first
+                    if await el.is_visible(timeout=600):
+                        await el.click(force=True)
+                        return True
+                except Exception:
+                    continue
     return False
 
-async def estrai_proprieta_dom_valori(target_frame) -> dict:
-    """Ispeziona le proprietà JS .value e .selectedIndex degli elementi DOM ignorando innerText."""
-    try:
-        return await target_frame.evaluate('''() => {
-            let res = {};
-
-            const registraCoppia = (lbl, val) => {
-                if (!lbl || !val) return;
-                let labelPulita = lbl.trim().replace(/[:*]/g, '');
-                let valorePulito = val.trim();
+async def estrai_tutti_i_campi_dalla_pagina(page) -> dict:
+    """Estrae i dati da qualsiasi elemento (inclusi readonly, disabled, select e span) rispettando la struttura DOM."""
+    mappa = {}
+    for frame in page.frames:
+        try:
+            dati = await frame.evaluate('''() => {
+                let res = {};
                 
-                if (!labelPulita || labelPulita.length < 2 || labelPulita.length > 50) return;
-                if (/^\\d+$/.test(labelPulita) || labelPulita.includes(' - ') || valorePulito.includes(' - ')) return;
+                const pulisci = (s) => (s || '').trim().replace(/[:*]/g, '');
 
-                let valLow = valorePulito.toLowerCase();
-                if (valorePulito && 
-                    !valLow.includes('seleziona') && 
-                    !valLow.includes('cerca') && 
-                    valorePulito !== 'ui-button' && 
-                    valorePulito !== '125' && 
-                    !valorePulito.includes('javax.faces') &&
-                    !valorePulito.includes('\\n')) {
-                    res[labelPulita] = valorePulito;
-                }
-            };
-
-            // 1. Lettura diretta delle proprietà .value dagli input e .text dalle opzioni selezionate
-            const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
-            inputs.forEach(inp => {
-                let val = '';
-                if (inp.tagName.toLowerCase() === 'select') {
-                    if (inp.selectedIndex >= 0 && inp.options[inp.selectedIndex]) {
-                        val = inp.options[inp.selectedIndex].text || '';
+                const registra = (lbl, val) => {
+                    let label = pulisci(lbl);
+                    let valore = pulisci(val);
+                    if (!label || label.length < 2 || label.length > 60 || /^\\d+$/.test(label)) return;
+                    
+                    let valLow = valore.toLowerCase();
+                    if (valore && 
+                        !valLow.includes('seleziona') && 
+                        !valLow.includes('cerca') && 
+                        valore !== 'ui-button' && 
+                        valore !== '125' && 
+                        !valore.includes('javax.faces') &&
+                        !valore.includes('\\n')) {
+                        res[label] = valore;
                     }
-                } else {
-                    val = inp.value || inp.getAttribute('value') || '';
-                }
+                };
 
-                let cellaPadre = inp.closest('td, th, .ui-panelgrid-cell');
-                let cellaEtichetta = cellaPadre ? cellaPadre.previousElementSibling : null;
-                let testoEtichetta = cellaEtichetta ? (cellaEtichetta.innerText || cellaEtichetta.textContent || '') : '';
-                registraCoppia(testoEtichetta, val);
-            });
+                // 1. Scan Input, Select e Textarea
+                const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
+                inputs.forEach(i => {
+                    let val = '';
+                    if (i.tagName.toLowerCase() === 'select') {
+                        val = i.options[i.selectedIndex] ? i.options[i.selectedIndex].text : '';
+                    } else {
+                        val = i.value || i.getAttribute('value') || '';
+                    }
+                    
+                    let labelText = '';
+                    if (i.id) {
+                        let l = document.querySelector(`label[for="${i.id}"]`);
+                        if (l) labelText = l.innerText || l.textContent;
+                    }
+                    if (!labelText) {
+                        let parent = i.closest('td, th, .ui-panelgrid-cell, div');
+                        let prev = parent ? parent.previousElementSibling : null;
+                        if (prev) labelText = prev.innerText || prev.textContent;
+                    }
+                    registra(labelText, val);
+                });
 
-            // 2. Lettura dei menu a tendina custom di PrimeFaces
-            const pfLabels = Array.from(document.querySelectorAll('.ui-selectonemenu-label, .ui-selectonemenu-title'));
-            pfLabels.forEach(pf => {
-                let val = pf.innerText || pf.textContent || '';
-                let cellaPadre = pf.closest('td, th, .ui-panelgrid-cell');
-                let cellaEtichetta = cellaPadre ? cellaPadre.previousElementSibling : null;
-                let testoEtichetta = cellaEtichetta ? (cellaEtichetta.innerText || cellaEtichetta.textContent || '') : '';
-                registraCoppia(testoEtichetta, val);
-            });
+                // 2. Scan PrimeFaces Dropdown
+                const pfLabels = Array.from(document.querySelectorAll('.ui-selectonemenu-label, .ui-selectonemenu-title'));
+                pfLabels.forEach(pf => {
+                    let txt = pf.innerText || pf.textContent || '';
+                    let parent = pf.closest('td, th, .ui-panelgrid-cell, div');
+                    let prev = parent ? parent.previousElementSibling : null;
+                    if (prev) registra(prev.innerText || prev.textContent, txt);
+                });
 
-            // 3. Lettura dei campi di solo testo statico
-            const outputs = Array.from(document.querySelectorAll('.ui-outputlabel, span[id*="main"], td.ui-panelgrid-cell'));
-            outputs.forEach(out => {
-                let val = out.innerText || out.textContent || '';
-                let cellaPadre = out.closest('td, th, .ui-panelgrid-cell');
-                let cellaEtichetta = cellaPadre ? cellaPadre.previousElementSibling : null;
-                if (cellaEtichetta && cellaEtichetta !== cellaPadre) {
-                    let testoEtichetta = cellaEtichetta.innerText || cellaEtichetta.textContent || '';
-                    registraCoppia(testoEtichetta, val);
-                }
-            });
+                // 3. Scan celle TD/TH adiacenti
+                const rows = Array.from(document.querySelectorAll('tr, .ui-panelgrid-cell, .ui-g'));
+                rows.forEach(r => {
+                    const children = Array.from(r.children);
+                    if (children.length >= 2) {
+                        for (let idx = 0; idx < children.length - 1; idx++) {
+                            let lbl = children[idx].innerText || children[idx].textContent || '';
+                            let valCell = children[idx + 1];
+                            let val = '';
+                            let inp = valCell.querySelector('input, select, textarea');
+                            if (inp) {
+                                val = inp.tagName.toLowerCase() === 'select' ? 
+                                    (inp.options[inp.selectedIndex] ? inp.options[inp.selectedIndex].text : '') : 
+                                    (inp.value || inp.getAttribute('value') || '');
+                            } else {
+                                val = valCell.innerText || valCell.textContent || '';
+                            }
+                            registra(lbl, val);
+                        }
+                    }
+                });
 
-            return res;
-        }''')
-    except Exception:
-        return {}
+                return res;
+            }''')
+            if dati:
+                mappa.update(dati)
+        except Exception:
+            continue
+    return mappa
 
 def cerca_in_mappa(mappa: dict, keywords: list) -> str:
-    scarti = ["proprietario", "contraente", "usufruttuario", "conducente", "aggiungi una figura", "0", "cerca", "m20", "m30", "m40"]
+    scarti = ["proprietario", "contraente", "usufruttuario", "conducente", "aggiungi una figura", "0", "cerca", "m20", "m30", "m40", "na", "--"]
     for k_map, v_map in mappa.items():
+        k_clean = k_map.strip().lower()
+        v_clean = v_map.strip()
+        
+        if not v_clean or v_clean.lower() in scarti or "\n" in v_clean:
+            continue
+
         for kw in keywords:
-            if kw.lower() in k_map.lower():
-                val = v_map.strip() if v_map else ""
-                if val and "\n" not in val and val.lower() not in scarti:
-                    return val
+            kw_clean = kw.strip().lower()
+            # Uso dei confini di parola (\b) per evitare che "CU" combaci con "di CUi"
+            pattern = r'\b' + re.escape(kw_clean) + r'\b'
+            if re.search(pattern, k_clean):
+                # Sanificazione specifica per la Classe CU (es. "c013" -> "13")
+                if kw_clean in ["classe cu", "cu", "classe cu assegnata", "classe cu di assegnazione"]:
+                    m_num = re.search(r'\b(\d{1,2})\b', v_clean)
+                    if m_num:
+                        return m_num.group(1)
+                return v_clean
     return ""
 
 def pulisci_valore(valore: str) -> str:
     if not valore:
         return ""
     v = valore.strip()
-    scarti = ["cerca", "seleziona", "ui-button", "codice marca", "descrizione modello", "impresa", "compagnia", "proprietario", "contraente", "0", "m20", "m30", "m40"]
+    scarti = ["cerca", "seleziona", "ui-button", "codice marca", "descrizione modello", "impresa", "compagnia", "proprietario", "contraente", "0", "m20", "m30", "m40", "na", "--"]
     if v.lower() in scarti or "\n" in v or len(v) > 120:
         return ""
     return v
@@ -187,7 +219,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
         targa_spazi = formatta_targa_spazi(targa)
         targa_pulita = targa.replace(" ", "").upper()
 
-        print(f"[{record_id}] Avvio estrazione proprieta DOM per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
+        print(f"[{record_id}] Avvio estrazione corretta per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
         requests.patch(
             url_trattativa,
             headers=headers,
@@ -349,7 +381,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 print("Invio form maschera con clic su Prosegui...", flush=True)
                 await invia_form_prosegui(page, target_frame)
 
-                # 3. ATTESA RISULTATI ED ESTRAZIONE
+                # 3. ATTESA RISULTATI E SCANSIONE SUB-TAB
                 print("Attesa calcolo ed elaborazione del Preventivo (fino a 40s)...", flush=True)
                 result_frame = None
                 for _ in range(40):
@@ -368,39 +400,40 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     result_frame = target_frame
 
                 mappa_totale = {}
+                print("RISULTATI PREVENTIVO RILEVATI! Clic e lettura delle 3 schede...", flush=True)
 
-                # 1. Veicolo
-                print("1/3 Clic su 'DATI ASSICURATIVI' / 'Veicolo'...", flush=True)
-                await clicca_subtab(page, result_frame, "DATI ASSICURATIVI")
+                # --- SCHEDA 1: DATI ASSICURATIVI -> Veicolo/natante ---
+                print("1/3 Clic su 'DATI ASSICURATIVI' / 'Veicolo/natante'...", flush=True)
+                await clicca_subtab(page, result_frame, ["DATI ASSICURATIVI"])
                 await page.wait_for_timeout(1000)
-                await clicca_subtab(page, result_frame, "Veicolo")
-                await page.wait_for_timeout(3000)
-                d1 = await estrai_proprieta_dom_valori(result_frame)
+                await clicca_subtab(page, result_frame, ["Veicolo/natante", "Veicolo"])
+                await page.wait_for_timeout(2500)
+                d1 = await estrai_tutti_i_campi_dalla_pagina(page)
                 print(f" -> Scheda Veicolo: {len(d1)} campi estratti", flush=True)
                 mappa_totale.update(d1)
 
-                # 2. Figure contrattuali
+                # --- SCHEDA 2: Figure contrattuali ---
                 print("2/3 Clic su 'Figure contrattuali'...", flush=True)
-                await clicca_subtab(page, result_frame, "Figure contrattuali")
-                await page.wait_for_timeout(3000)
-                d2 = await estrai_proprieta_dom_valori(result_frame)
+                await clicca_subtab(page, result_frame, ["Figure contrattuali"])
+                await page.wait_for_timeout(2500)
+                d2 = await estrai_tutti_i_campi_dalla_pagina(page)
                 print(f" -> Scheda Figure Contrattuali: {len(d2)} campi estratti", flush=True)
                 mappa_totale.update(d2)
 
-                # 3. Posizione assicurativa
+                # --- SCHEDA 3: Posizione assicurativa ---
                 print("3/3 Clic su 'Posizione assicurativa'...", flush=True)
-                await clicca_subtab(page, result_frame, "Posizione assicurativa")
-                await page.wait_for_timeout(3000)
-                d3 = await estrai_proprieta_dom_valori(result_frame)
+                await clicca_subtab(page, result_frame, ["Posizione assicurativa"])
+                await page.wait_for_timeout(2500)
+                d3 = await estrai_tutti_i_campi_dalla_pagina(page)
                 print(f" -> Scheda Posizione Assicurativa: {len(d3)} campi estratti", flush=True)
                 mappa_totale.update(d3)
 
-                print("\n================ MAPPA DATI ESTRATTI DA PROPRIETA DOM ================", flush=True)
+                print("\n================ MAPPA DATI ESTRATTI DAL DOM ================", flush=True)
                 for k, v in list(mappa_totale.items())[:30]:
                     print(f"  [{k}] => {v}", flush=True)
-                print("=======================================================================\n", flush=True)
+                print("=============================================================\n", flush=True)
 
-                # Mappatura delle variabili
+                # Estrattore mirato
                 cf = cerca_in_mappa(mappa_totale, ["Cod.Fisc/P.IVA", "Cod.Fisc", "C.F.", "Codice Fiscale"])
                 nome = cerca_in_mappa(mappa_totale, ["Nominativo", "Cliente"])
                 data_nas = cerca_in_mappa(mappa_totale, ["Data di nascita", "Nato il"])
@@ -414,7 +447,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 data_immat = cerca_in_mappa(mappa_totale, ["Data prima immatricolazione", "Immatricolazione"])
                 alimentazione_raw = cerca_in_mappa(mappa_totale, ["Alimentazione"])
 
-                # Conversione numerica KW per Airtable
+                # Conversione numerica KW
                 kw = None
                 if kw_raw:
                     clean_kw = re.sub(r'[^\d.,]', '', kw_raw).replace(',', '.')
@@ -439,8 +472,8 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 elif "ELETTRICA" in alimentazione_raw.upper() or "IBRIDA" in alimentazione_raw.upper():
                     alimentazione = "Ibrida/Elettrica"
 
-                classe_cu = cerca_in_mappa(mappa_totale, ["Classe CU di assegnazione", "Classe CU", "CU di assegnazione", "CU"])
-                compagnia_provenienza = cerca_in_mappa(mappa_totale, ["Impresa", "Compagnia di provenienza", "Compagnia"])
+                classe_cu = cerca_in_mappa(mappa_totale, ["Classe CU assegnata", "Classe CU di assegnazione", "Classe CU"])
+                compagnia_provenienza = cerca_in_mappa(mappa_totale, ["Compagnia di provenienza", "Impresa", "Compagnia"])
 
                 nome_clean = pulisci_valore(nome)
                 cf_clean = pulisci_valore(cf)
@@ -450,7 +483,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 print(f"VALORI REALI ESTRATTI -> Nome: '{nome_clean}', CF: '{cf_clean}', Marca: '{marca_clean}', Modello: '{modello_clean}', KW: {kw}, CU: '{classe_cu}', Compagnia: '{compagnia_clean}'", flush=True)
 
-                # 4. SALVATAGGIO SU AIRTABLE CON CLEANUP ANTI-422
+                # 4. SALVATAGGIO SU AIRTABLE CON SANIFICAZIONE AUTOMATICA
                 print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
                 
                 raw_fields = {
