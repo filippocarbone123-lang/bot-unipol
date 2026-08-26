@@ -136,12 +136,11 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 leonardo_url = "https://essig.unipolsai.it/WorkspaceWeb/app/configuratore_questionari/questionario"
                 
                 try:
-                    # Navigazione immediata con commit (non attende la domcontentloaded se il server è lento)
                     await page.goto(leonardo_url, wait_until="commit", timeout=20000)
                 except Exception as e:
                     print(f"Interferenza di rete ({e}), proseguo sulla pagina corrente...", flush=True)
 
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(4000)
                 print(f"Atterraggio completato su: {page.url}", flush=True)
 
                 # ==========================================
@@ -149,10 +148,23 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 # ==========================================
                 print("Ingresso nel Preventivatore Unipol...", flush=True)
                 
-                prodotti_btn = page.locator('button:has-text("PRODOTTI"), .p-button:has-text("PRODOTTI")').first
-                await prodotti_btn.wait_for(state="visible", timeout=25000)
-                await prodotti_btn.click(force=True)
-                await page.wait_for_timeout(1200)
+                # Clic dinamico multi-frame su PRODOTTI
+                prodotti_clicked = False
+                for _ in range(20):
+                    for frame in [page.main_frame] + page.frames:
+                        try:
+                            btn = frame.locator('button:has-text("PRODOTTI"), .p-button:has-text("PRODOTTI"), text="PRODOTTI"').first
+                            if await btn.is_visible(timeout=500):
+                                await btn.click(force=True)
+                                prodotti_clicked = True
+                                break
+                        except Exception:
+                            continue
+                    if prodotti_clicked:
+                        break
+                    await asyncio.sleep(1)
+
+                await page.wait_for_timeout(1500)
 
                 print("Selezione ALTRI PRODOTTI DANNI...", flush=True)
                 await page.get_by_text("ALTRI PRODOTTI DANNI").first.click(force=True)
