@@ -81,55 +81,60 @@ async def invia_form_prosegui(page, target_frame) -> bool:
             continue
     return False
 
-async def estrai_mappa_primefaces(page) -> dict:
-    """Mappa tutte le tabelle PrimeFaces/JSF associando ad ogni etichetta il suo valore reale visibile."""
-    mappa_dati = {}
-    for frame in page.frames:
-        try:
-            dati_frame = await frame.evaluate('''() => {
-                let res = {};
-                const rows = Array.from(document.querySelectorAll('tr'));
-                rows.forEach(r => {
-                    const cells = Array.from(r.querySelectorAll('td, th'));
-                    if (cells.length >= 2) {
-                        for (let i = 0; i < cells.length - 1; i += 2) {
-                            let label = cells[i].innerText ? cells[i].innerText.trim().replace(/[:*]/g, '') : '';
-                            let valCell = cells[i+1];
-                            if (label && valCell) {
-                                // Se la cella contiene un menu a tendina PrimeFaces
-                                let pfLabel = valCell.querySelector('.ui-selectonemenu-label, .ui-selectonemenu-title');
-                                let inputEl = valCell.querySelector('input:not([type="hidden"]), select');
-                                let val = '';
-                                if (pfLabel && pfLabel.innerText) {
-                                    val = pfLabel.innerText;
-                                } else if (inputEl && inputEl.value) {
-                                    val = inputEl.value;
-                                } else {
-                                    val = valCell.innerText;
+async def estrai_campo_label(frame, keywords: list) -> str:
+    """Estrae il valore reale affiancato alle etichette nelle tabelle HTML/PrimeFaces."""
+    try:
+        valore = await frame.evaluate('''(kws) => {
+            const allElements = Array.from(document.querySelectorAll('td, th, label, span, div'));
+            for (let kw of kws) {
+                for (let el of allElements) {
+                    const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    if (text === kw.toLowerCase() || (text.includes(kw.toLowerCase()) && text.length < 45)) {
+                        let cell = el.closest('td, th');
+                        let nextCell = cell ? cell.nextElementSibling : null;
+                        
+                        if (!nextCell && cell && cell.parentElement) {
+                            let tds = Array.from(cell.parentElement.querySelectorAll('td, th'));
+                            let idx = tds.indexOf(cell);
+                            if (idx >= 0 && idx + 1 < tds.length) {
+                                nextCell = tds[idx + 1];
+                            }
+                        }
+
+                        if (nextCell) {
+                            // 1. Cerca dentro Select o Input
+                            let inp = nextCell.querySelector('input:not([type="hidden"]), select, textarea');
+                            if (inp) {
+                                if (inp.tagName.toLowerCase() === 'select') {
+                                    let opt = inp.options[inp.selectedIndex];
+                                    if (opt && opt.text && opt.text.trim()) return opt.text.trim();
                                 }
-                                if (val) {
-                                    res[label] = val.trim();
-                                }
+                                if (inp.value && inp.value.trim()) return inp.value.trim();
+                                let attrVal = inp.getAttribute('value');
+                                if (attrVal && attrVal.trim()) return attrVal.trim();
+                            }
+
+                            // 2. Componenti PrimeFaces (.ui-selectonemenu-label)
+                            let pfLabel = nextCell.querySelector('.ui-selectonemenu-label, .ui-selectonemenu-title');
+                            if (pfLabel && pfLabel.innerText && pfLabel.innerText.trim()) {
+                                let t = pfLabel.innerText.trim();
+                                if (!t.toLowerCase().includes('seleziona')) return t;
+                            }
+
+                            // 3. Testo semplice nella cella adiacente
+                            let cellText = (nextCell.innerText || nextCell.textContent || '').trim();
+                            if (cellText && cellText.toLowerCase() !== 'cerca' && cellText !== 'ui-button') {
+                                return cellText;
                             }
                         }
                     }
-                });
-                return res;
-            }''')
-            if dati_frame:
-                mappa_dati.update(dati_frame)
-        except Exception:
-            continue
-    return mappa_dati
-
-def cerca_in_mappa(mappa: dict, chiavi: list) -> str:
-    for k_map, v_map in mappa.items():
-        for k_cerca in chiavi:
-            if k_cerca.lower() in k_map.lower():
-                # Filtra le descrizioni generiche o le liste multilinea
-                if v_map and "\n" not in v_map and v_map.lower() not in ["cerca", "seleziona", "ui-button"]:
-                    return v_map.strip()
-    return ""
+                }
+            }
+            return '';
+        }''', keywords)
+        return valore if valore else ""
+    except Exception:
+        return ""
 
 async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: str):
     async with bot_semaphore:
@@ -142,7 +147,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
         targa_spazi = formatta_targa_spazi(targa)
         targa_pulita = targa.replace(" ", "").upper()
 
-        print(f"[{record_id}] Avvio estrazione chirurgica PrimeFaces per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
+        print(f"[{record_id}] Avvio estrazione guidata per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
         requests.patch(
             url_trattativa,
             headers=headers,
@@ -306,7 +311,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 print("Invio form maschera con clic su Prosegui...", flush=True)
                 await invia_form_prosegui(page, target_frame)
 
-                # 3. ATTESA DINAMICA E SCANSIONE MAPPATA DELLE SCHEDE
+                # 3. NAVIGAZIONE SCHEDE AJAX ED ESTRAZIONE
                 print("Attesa calcolo ed elaborazione del Preventivo (fino a 40s)...", flush=True)
                 result_frame = None
                 for _ in range(40):
@@ -321,70 +326,62 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                         break
                     await asyncio.sleep(1)
 
-                mappa_totale = {}
+                data_immat, alimentazione, kw, marca, modello = "", "", "", "", ""
+                nome, cf, data_nas, residenza, cap, prov = "", "", "", "", "", ""
+                classe_cu, compagnia_provenienza = "", ""
 
                 if result_frame:
                     print("RISULTATI PREVENTIVO RILEVATI! Lettura schede...", flush=True)
-                    
-                    for tab_name in ["DATI ASSICURATIVI", "Figure contrattuali", "Posizione assicurativa"]:
-                        try:
-                            t = result_frame.locator(f'text="{tab_name}"').first
-                            if await t.is_visible(timeout=2000):
-                                print(f"Caricamento ed estrazione scheda: {tab_name}...", flush=True)
-                                await t.click(force=True)
-                                await page.wait_for_timeout(2500) # Attesa scaricamento AJAX
-                                # Aggiorna la mappa con le coppie Label-Valore della scheda corrente
-                                mappa_scheda = await estrai_mappa_primefaces(page)
-                                mappa_totale.update(mappa_scheda)
-                        except Exception:
-                            continue
-                else:
-                    print("ATTENZIONE: Pagina risultati non rilevata in tempo, provo comunque la mappatura...", flush=True)
-                    mappa_totale = await estrai_mappa_primefaces(page)
 
-                print("\n================ MAPPA DATI ESTRATTI PRIMEFACES ================", flush=True)
-                for k, v in list(mappa_totale.items())[:20]:
-                    print(f"  [{k}] => {v}", flush=True)
-                print("=================================================================\n", flush=True)
+                    # --- SCHEDA 1: DATI ASSICURATIVI / Veicolo ---
+                    tab_dati = result_frame.locator('text="DATI ASSICURATIVI"').first
+                    if await tab_dati.is_visible():
+                        await tab_dati.click(force=True)
+                        await page.wait_for_timeout(2000)
 
-                # Estrazione chirurgica dalle coppie Label-Valore
-                cf = cerca_in_mappa(mappa_totale, ["Cod.Fisc", "C.F.", "Codice Fiscale"])
-                nome = cerca_in_mappa(mappa_totale, ["Nominativo", "Proprietario", "Cliente"])
-                data_nas = cerca_in_mappa(mappa_totale, ["Data di nascita", "Nato il"])
-                residenza = cerca_in_mappa(mappa_totale, ["Indirizzo", "Residenza"])
-                prov = cerca_in_mappa(mappa_totale, ["Prov", "Provincia"])
-                
-                marca = cerca_in_mappa(mappa_totale, ["Codice marca", "Marca"])
-                modello = cerca_in_mappa(mappa_totale, ["Descrizione modello", "Modello"])
-                kw = cerca_in_mappa(mappa_totale, ["KW"])
-                data_immat = cerca_in_mappa(mappa_totale, ["Data prima immatricolazione", "Immatricolazione"])
-                alimentazione_raw = cerca_in_mappa(mappa_totale, ["Alimentazione"])
-                
-                # Normalizzazione Alimentazione per Airtable Single-Select
-                alimentazione = ""
-                if "BENZINA" in alimentazione_raw.upper():
-                    alimentazione = "Benzina"
-                elif "DIESEL" in alimentazione_raw.upper():
-                    alimentazione = "Diesel"
-                elif "GPL" in alimentazione_raw.upper():
-                    alimentazione = "GPL"
-                elif "METANO" in alimentazione_raw.upper():
-                    alimentazione = "Metano"
-                elif "ELETTRICA" in alimentazione_raw.upper() or "IBRIDA" in alimentazione_raw.upper():
-                    alimentazione = "Ibrida/Elettrica"
+                    sub_veic = result_frame.locator('text=/Veicolo/i').first
+                    if await sub_veic.is_visible():
+                        await sub_veic.click(force=True)
+                        await page.wait_for_timeout(2000)
 
-                classe_cu = cerca_in_mappa(mappa_totale, ["Classe CU di assegnazione", "Classe CU", "CU"])
-                compagnia_provenienza = cerca_in_mappa(mappa_totale, ["Compagnia di provenienza", "Impresa"])
+                    data_immat = await estrai_campo_label(result_frame, ["Data prima immatricolazione"])
+                    alimentazione = await estrai_campo_label(result_frame, ["Alimentazione"])
+                    kw = await estrai_campo_label(result_frame, ["KW"])
+                    marca = await estrai_campo_label(result_frame, ["Codice marca", "Marca"])
+                    modello = await estrai_campo_label(result_frame, ["Descrizione modello", "Modello"])
 
-                print(f"VALORI REALI ESTRATTI -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', Alimentazione: '{alimentazione}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
+                    # --- SCHEDA 2: Figure contrattuali ---
+                    sub_fig = result_frame.locator('text="Figure contrattuali"').first
+                    if await sub_fig.is_visible():
+                        await sub_fig.click(force=True)
+                        await page.wait_for_timeout(2500) # Attesa carica AJAX
 
-                # 4. SALVATAGGIO SU AIRTABLE
+                    nome = await estrai_campo_label(result_frame, ["Nominativo", "PROPRIETARIO"])
+                    cf = await estrai_campo_label(result_frame, ["Cod.Fisc/P.IVA", "Cod.Fisc", "C.F"])
+                    data_nas = await estrai_campo_label(result_frame, ["Data di nascita"])
+                    residenza = await estrai_campo_label(result_frame, ["Indirizzo"])
+                    cap = await estrai_campo_label(result_frame, ["CAP"])
+                    prov = await estrai_campo_label(result_frame, ["Prov"])
+
+                    # --- SCHEDA 3: Posizione assicurativa ---
+                    sub_pos = result_frame.locator('text="Posizione assicurativa"').first
+                    if await sub_pos.is_visible():
+                        await sub_pos.click(force=True)
+                        await page.wait_for_timeout(2500) # Attesa carica AJAX
+
+                    classe_cu = await estrai_campo_label(result_frame, ["Classe CU di assegnazione", "Classe CU"])
+                    compagnia_provenienza = await estrai_campo_label(result_frame, ["Impresa", "Compagnia di provenienza"])
+
+                print(f"VALORI REALI ESTRATTI -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
+
+                # 4. SALVATAGGIO SU AIRTABLE CON RETRY AUTOMATICO
                 print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
                 raw_fields = {
                     "Nome": nome,
                     "Codice Fiscale": cf,
                     "cl_datanascita": data_nas,
                     "cl_indirizzo": residenza,
+                    "cl_cap": cap,
                     "cl_provincia": prov,
                     "Marca": marca,
                     "Modello": modello,
@@ -400,8 +397,17 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 payload_trattativa = {"fields": cleaned_fields}
 
                 res = requests.patch(url_trattativa, headers=headers, json=payload_trattativa)
-                if res.status_code != 200:
-                    print(f"Risposta Error Airtable: {res.text}", flush=True)
+                
+                # Se Airtable segnala un campo sconosciuto/invalido (es. cl_cap), lo rimuove e riprova
+                if res.status_code == 422:
+                    print(f"Rilevato errore campo Airtable ({res.text}), riprovo senza campi opzionali...", flush=True)
+                    err_txt = res.text
+                    if "cl_cap" in err_txt:
+                        cleaned_fields.pop("cl_cap", None)
+                    if "Alimentazione" in err_txt:
+                        cleaned_fields.pop("Alimentazione", None)
+                    res = requests.patch(url_trattativa, headers=headers, json={"fields": cleaned_fields})
+
                 res.raise_for_status()
                 print(f"[{record_id}] ESTRAZIONE E MAPPATURA COMPLETATE CON SUCCESSO!", flush=True)
 
