@@ -25,7 +25,6 @@ def formatta_targa_spazi(targa_raw: str) -> str:
     return clean
 
 async def click_elemento_dinamico(page, testo: str, max_tentativi=15) -> bool:
-    """Cerca e clicca un testo o sotto-tab su TUTTI gli iframe della pagina."""
     for _ in range(max_tentativi):
         for frame in [page.main_frame] + page.frames:
             try:
@@ -82,51 +81,90 @@ async def invia_form_prosegui(page, target_frame) -> bool:
             continue
     return False
 
-async def estrai_dati_globali(page) -> dict:
-    """Scansiona tutti gli iframe della pagina per estrarre la mappa completa di etichette e valori."""
-    risultato_globale = {}
-    for frame in page.frames:
-        try:
-            dati_frame = await frame.evaluate('''() => {
-                let res = {};
-                const cells = Array.from(document.querySelectorAll('td, th, label, .ui-outputlabel'));
-                cells.forEach(el => {
-                    let labelText = (el.innerText || el.textContent || '').trim().replace(/[:*]/g, '');
-                    if (labelText && labelText.length > 1 && labelText.length < 50) {
-                        let parentTd = el.closest('td, th');
-                        let targetTd = parentTd ? parentTd.nextElementSibling : null;
+async def clicca_tab_in_frame(frame, nome_tab: str) -> bool:
+    """Clicca direttamente sulla scheda all'interno del frame dei risultati."""
+    try:
+        return await frame.evaluate('''(tabText) => {
+            const els = Array.from(document.querySelectorAll('a, li, span, td, div'));
+            const match = els.find(e => {
+                const txt = (e.innerText || e.textContent || '').trim().toLowerCase();
+                return txt === tabText.toLowerCase() || txt.includes(tabText.toLowerCase());
+            });
+            if (match) {
+                (match.closest('a, li, td, button') || match).click();
+                return true;
+            }
+            return false;
+        }''', nome_tab)
+    except Exception:
+        return False
+
+async def estrai_dati_da_frame(frame) -> dict:
+    """Scansiona l'iframe attivo escludendo le tabelle numeriche dei cavalli fiscali."""
+    try:
+        return await frame.evaluate('''() => {
+            let res = {};
+
+            // 1. Scan Input e Select visibili
+            const inputs = Array.from(document.querySelectorAll('input:not([type="hidden"]), select, textarea'));
+            inputs.forEach(i => {
+                let val = '';
+                if (i.tagName.toLowerCase() === 'select') {
+                    if (i.selectedIndex >= 0 && i.options[i.selectedIndex]) {
+                        val = i.options[i.selectedIndex].text || '';
+                    }
+                } else {
+                    val = i.value || i.getAttribute('value') || '';
+                }
+                val = (val || '').trim();
+                if (val && val !== '125' && !val.toLowerCase().includes('cerca')) {
+                    let parentTd = i.closest('td');
+                    let labelTd = parentTd ? parentTd.previousElementSibling : null;
+                    let label = labelTd ? (labelTd.innerText || labelTd.textContent || '').trim().replace(/[:*]/g, '') : '';
+                    if (label && label.length > 1 && label.length < 50) {
+                        res[label] = val;
+                    }
+                }
+            });
+
+            // 2. Scan PrimeFaces SelectOneMenu (.ui-selectonemenu-label)
+            const pfLabels = Array.from(document.querySelectorAll('.ui-selectonemenu-label, .ui-selectonemenu-title'));
+            pfLabels.forEach(pf => {
+                let val = (pf.innerText || pf.textContent || '').trim();
+                let parentTd = pf.closest('td');
+                let labelTd = parentTd ? parentTd.previousElementSibling : null;
+                if (labelTd && val && !val.toLowerCase().includes('seleziona')) {
+                    let label = (labelTd.innerText || labelTd.textContent || '').trim().replace(/[:*]/g, '');
+                    if (label && label.length > 1) res[label] = val;
+                }
+            });
+
+            // 3. Scan coppie TD/TH (Escludendo i numeri dei cavalli fiscali)
+            const rows = Array.from(document.querySelectorAll('tr'));
+            rows.forEach(r => {
+                const tds = Array.from(r.querySelectorAll('td, th'));
+                if (tds.length >= 2) {
+                    for (let idx = 0; idx < tds.length - 1; idx += 2) {
+                        let lbl = (tds[idx].innerText || tds[idx].textContent || '').trim().replace(/[:*]/g, '');
+                        let valTd = tds[idx + 1];
                         
-                        if (targetTd) {
-                            let val = '';
-                            let inputEl = targetTd.querySelector('input:not([type="hidden"]), select, textarea');
-                            let pfLabel = targetTd.querySelector('.ui-selectonemenu-label, .ui-selectonemenu-title');
-                            
-                            if (pfLabel && pfLabel.innerText && pfLabel.innerText.trim()) {
-                                val = pfLabel.innerText.trim();
-                            } else if (inputEl) {
-                                if (inputEl.tagName.toLowerCase() === 'select') {
-                                    val = inputEl.options[inputEl.selectedIndex] ? inputEl.options[inputEl.selectedIndex].text : inputEl.value;
-                                } else {
-                                    val = inputEl.value || inputEl.getAttribute('value') || '';
+                        // Scarta chiavi costituite da soli numeri (es. 10, 11) per evitare la tabella cavalli fiscali
+                        if (lbl && !/^\\d+$/.test(lbl) && lbl.length > 1 && lbl.length < 50 && valTd) {
+                            let textVal = (valTd.innerText || valTd.textContent || '').trim();
+                            if (textVal && !textVal.includes('\\n') && !textVal.includes(' - ') && textVal.length < 100) {
+                                if (!res[lbl] && !textVal.toLowerCase().includes('cerca') && textVal !== 'ui-button') {
+                                    res[lbl] = textVal;
                                 }
-                            } else {
-                                val = targetTd.innerText || targetTd.textContent || '';
-                            }
-                            
-                            val = val.trim();
-                            if (val && !val.toLowerCase().includes('cerca') && val !== 'ui-button' && !val.includes('=== ')) {
-                                res[labelText] = val;
                             }
                         }
                     }
-                });
-                return res;
-            }''')
-            if dati_frame:
-                risultato_globale.update(dati_frame)
-        except Exception:
-            continue
-    return risultato_globale
+                }
+            });
+
+            return res;
+        }''')
+    except Exception:
+        return {}
 
 def cerca_valore_mappa(mappa: dict, keywords: list) -> str:
     for k_map, v_map in mappa.items():
@@ -147,7 +185,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
         targa_spazi = formatta_targa_spazi(targa)
         targa_pulita = targa.replace(" ", "").upper()
 
-        print(f"[{record_id}] Avvio estrazione guidata per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
+        print(f"[{record_id}] Avvio estrazione chirurgica per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
         requests.patch(
             url_trattativa,
             headers=headers,
@@ -311,50 +349,55 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 print("Invio form maschera con clic su Prosegui...", flush=True)
                 await invia_form_prosegui(page, target_frame)
 
-                # 3. ATTESA RISULTATI E APERTURA APPOSITA SCHEDE AJAX
+                # 3. ATTESA RISULTATI E APERTURA DELLE SCHEDE NEL FRAME CORRETTO
                 print("Attesa calcolo ed elaborazione del Preventivo (fino a 40s)...", flush=True)
-                result_detected = False
+                result_frame = None
                 for _ in range(40):
                     for frame in page.frames:
                         try:
                             if await frame.locator('text=/GARANZIE E SERVIZI|DATI ASSICURATIVI|POSIZIONE ASSICURATIVA/i').count() > 0:
-                                result_detected = True
+                                result_frame = frame
                                 break
                         except Exception:
                             continue
-                    if result_detected:
+                    if result_frame:
                         break
                     await asyncio.sleep(1)
 
                 mappa_totale = {}
 
-                if result_detected:
-                    print("RISULTATI PREVENTIVO RILEVATI! Apertura progressiva dei tab AJAX...", flush=True)
+                if result_frame:
+                    print("RISULTATI PREVENTIVO RILEVATI! Apertura ed estrazione tab per tab...", flush=True)
                     
-                    schede_da_aprire = [
-                        "DATI ASSICURATIVI",
-                        "Veicolo/natante",
-                        "Figure contrattuali",
-                        "Posizione assicurativa"
+                    schede = [
+                        ("DATI ASSICURATIVI", "Veicolo/natante"),
+                        ("Figure contrattuali", None),
+                        ("Posizione assicurativa", None)
                     ]
 
-                    for tab in schede_da_aprire:
-                        print(f"Clic su scheda: '{tab}'...", flush=True)
-                        clicked = await click_elemento_dinamico(page, tab, max_tentativi=10)
-                        if clicked:
-                            await page.wait_for_timeout(2500) # Attesa scaricamento AJAX della scheda
-                            dati_parziali = await estrai_dati_globali(page)
-                            mappa_totale.update(dati_parziali)
-                else:
-                    print("ATTENZIONE: Risultati non rilevati in tempo, provo estrazione diretta...", flush=True)
-                    mappa_totale = await estrai_dati_globali(page)
+                    for tab_main, sub_tab in schede:
+                        print(f"Apertura scheda: '{tab_main}'...", flush=True)
+                        await clicca_tab_in_frame(result_frame, tab_main)
+                        await page.wait_for_timeout(2000) # Attesa AJAX
 
-                print("\n================ MAPPA DATI ESTRATTI PRIMEFACES ================", flush=True)
+                        if sub_tab:
+                            await clicca_tab_in_frame(result_frame, sub_tab)
+                            await page.wait_for_timeout(1500)
+
+                        dati_tab = await estrai_dati_da_frame(result_frame)
+                        print(f" -> Estratti {len(dati_tab)} campi da '{tab_main}': {dati_tab}", flush=True)
+                        mappa_totale.update(dati_tab)
+                else:
+                    print("ATTENZIONE: Frame risultati non rilevato in tempo, eseguo scansione generica...", flush=True)
+                    for frame in page.frames:
+                        mappa_totale.update(await estrai_dati_da_frame(frame))
+
+                print("\n================ MAPPA DATI ESTRATTI FINALE ================", flush=True)
                 for k, v in list(mappa_totale.items())[:25]:
                     print(f"  [{k}] => {v}", flush=True)
-                print("=================================================================\n", flush=True)
+                print("=============================================================\n", flush=True)
 
-                # Estrattore mirato
+                # Mappatura mirata delle variabili
                 cf = cerca_valore_mappa(mappa_totale, ["Cod.Fisc/P.IVA", "Cod.Fisc", "C.F.", "Codice Fiscale"])
                 nome = cerca_valore_mappa(mappa_totale, ["Nominativo", "Proprietario", "Cliente"])
                 data_nas = cerca_valore_mappa(mappa_totale, ["Data di nascita", "Nato il"])
@@ -368,7 +411,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 data_immat = cerca_valore_mappa(mappa_totale, ["Data prima immatricolazione", "Immatricolazione"])
                 alimentazione_raw = cerca_valore_mappa(mappa_totale, ["Alimentazione"])
                 
-                # Format per Single-Select Airtable
+                # Single-Select Airtable
                 alimentazione = ""
                 if "BENZINA" in alimentazione_raw.upper():
                     alimentazione = "Benzina"
@@ -386,7 +429,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 print(f"VALORI REALI ESTRATTI -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
 
-                # 4. SALVATAGGIO SU AIRTABLE CON RETRY AUTOMATICO
+                # 4. SALVATAGGIO SU AIRTABLE
                 print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
                 raw_fields = {
                     "Nome": nome,
@@ -410,7 +453,6 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 res = requests.patch(url_trattativa, headers=headers, json=payload_trattativa)
                 
-                # Fallback in caso di opzione/campo non presente su Airtable
                 if res.status_code == 422:
                     print(f"Rilevato errore campo Airtable ({res.text}), riprovo senza campi opzionali...", flush=True)
                     err_txt = res.text
