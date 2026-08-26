@@ -24,16 +24,6 @@ def formatta_targa_spazi(targa_raw: str) -> str:
         return f"{clean[:2]} {clean[2:5]} {clean[5:]}"
     return clean
 
-async def attendi_primefaces_ajax(page, timeout_ms=5000):
-    """Attende che la coda di richieste AJAX di PrimeFaces sia completamente vuota."""
-    try:
-        await page.wait_for_function(
-            "() => typeof PrimeFaces === 'undefined' || !PrimeFaces.ajax || PrimeFaces.ajax.Queue.isEmpty()",
-            timeout=timeout_ms
-        )
-    except Exception:
-        await asyncio.sleep(1.5)
-
 async def click_elemento_dinamico(page, testo: str, max_tentativi=15) -> bool:
     for _ in range(max_tentativi):
         for frame in [page.main_frame] + page.frames:
@@ -96,14 +86,74 @@ async def clicca_subtab(page, result_frame, nome_tab: str) -> bool:
                 continue
     return False
 
-def estrai_con_regex(pattern: str, testo: str, default: str = "") -> str:
-    m = re.search(pattern, testo, re.IGNORECASE | re.MULTILINE)
-    if m and m.group(1):
-        v = m.group(1).strip()
-        # Filtra ID di sistema JSF o valori generici
-        if v not in ["125", "m20", "m30", "m40", "m50", "M21", "M26", "M24"] and not v.startswith("javax.faces"):
-            return v
-    return default
+async def estrai_dati_scheda(page) -> dict:
+    """Estrae in modo mirato e leggero le coppie etichetta-valore da qualsiasi griglia o tabella PrimeFaces."""
+    mappa = {}
+    for frame in page.frames:
+        try:
+            dati = await frame.evaluate('''() => {
+                let res = {};
+                const labels = Array.from(document.querySelectorAll('label, td, th, span.ui-outputlabel'));
+                
+                labels.forEach(lbl => {
+                    let labelText = (lbl.innerText || lbl.textContent || '').trim().replace(/[:*]/g, '');
+                    if (!labelText || labelText.length < 2 || labelText.length > 50 || /^\\d+$/.test(labelText)) return;
+                    
+                    let cell = lbl.closest('td, th, .ui-panelgrid-cell');
+                    let nextCell = cell ? cell.nextElementSibling : null;
+                    if (!nextCell && cell && cell.parentElement) {
+                        let children = Array.from(cell.parentElement.children);
+                        let idx = children.indexOf(cell);
+                        if (idx >= 0 && idx + 1 < children.length) nextCell = children[idx + 1];
+                    }
+
+                    if (nextCell) {
+                        let val = '';
+                        let inp = nextCell.querySelector('input, select, textarea');
+                        if (inp) {
+                            if (inp.tagName.toLowerCase() === 'select') {
+                                val = inp.options[inp.selectedIndex] ? inp.options[inp.selectedIndex].text : '';
+                            } else {
+                                val = inp.value || inp.getAttribute('value') || '';
+                            }
+                        }
+                        if (!val || !val.trim()) {
+                            let pf = nextCell.querySelector('.ui-selectonemenu-label, .ui-selectonemenu-title');
+                            if (pf) val = pf.innerText || pf.textContent || '';
+                        }
+                        if (!val || !val.trim()) {
+                            val = nextCell.innerText || nextCell.textContent || '';
+                        }
+
+                        val = (val || '').trim();
+                        if (val && 
+                            val !== '125' && 
+                            !val.toLowerCase().includes('cerca') && 
+                            !val.toLowerCase().includes('seleziona') &&
+                            val !== 'ui-button' && 
+                            !val.includes('javax.faces') &&
+                            !val.includes('\\n')) {
+                            res[labelText] = val;
+                        }
+                    }
+                });
+                return res;
+            }''')
+            if dati:
+                mappa.update(dati)
+        except Exception:
+            continue
+    return mappa
+
+def cerca_in_mappa(mappa: dict, keywords: list) -> str:
+    scarti = ["proprietario", "contraente", "usufruttuario", "conducente", "aggiungi una figura", "0", "cerca", "m20", "m30", "m40"]
+    for k_map, v_map in mappa.items():
+        for kw in keywords:
+            if kw.lower() in k_map.lower():
+                val = v_map.strip() if v_map else ""
+                if val and "\n" not in val and val.lower() not in scarti:
+                    return val
+    return ""
 
 def pulisci_valore(valore: str) -> str:
     if not valore:
@@ -125,7 +175,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
         targa_spazi = formatta_targa_spazi(targa)
         targa_pulita = targa.replace(" ", "").upper()
 
-        print(f"[{record_id}] Avvio Network Sniffing per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
+        print(f"[{record_id}] Avvio estrazione leggera per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
         requests.patch(
             url_trattativa,
             headers=headers,
@@ -150,21 +200,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             )
 
-            # Buffer di rete per catturare i payload XML/HTML trasmessi dal server Unipol
-            network_buffer = []
-
-            async def intercetta_risposta(response):
-                try:
-                    ct = response.headers.get("content-type", "")
-                    if "xml" in ct or "html" in ct or "javascript" in ct:
-                        body = await response.text()
-                        if body and len(body) > 50:
-                            network_buffer.append(body)
-                except Exception:
-                    pass
-
             page = await context.new_page()
-            page.on("response", intercetta_risposta)
 
             try:
                 # 1. LOGIN & MFA
@@ -301,7 +337,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 print("Invio form maschera con clic su Prosegui...", flush=True)
                 await invia_form_prosegui(page, target_frame)
 
-                # 3. ATTESA RISULTATI E APERTURA SCHEDE CON CAPTURE
+                # 3. ATTESA RISULTATI E APERTURA SCHEDE SINCRO
                 print("Attesa calcolo ed elaborazione del Preventivo (fino a 40s)...", flush=True)
                 result_frame = None
                 for _ in range(40):
@@ -319,56 +355,55 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 if not result_frame:
                     result_frame = target_frame
 
-                print("RISULTATI PREVENTIVO RILEVATI! Scatto delle schede AJAX...", flush=True)
+                mappa_totale = {}
+                print("RISULTATI PREVENTIVO RILEVATI! Clic ed estrazione schede...", flush=True)
 
-                # Clicchiamo sui tab garantendo il completamento AJAX
+                # 1. Veicolo
                 print("1/3 Clic su 'DATI ASSICURATIVI' / 'Veicolo'...", flush=True)
                 await clicca_subtab(page, result_frame, "DATI ASSICURATIVI")
-                await attendi_primefaces_ajax(page)
+                await page.wait_for_timeout(1000)
                 await clicca_subtab(page, result_frame, "Veicolo")
-                await attendi_primefaces_ajax(page)
+                await page.wait_for_timeout(2500)
+                d1 = await estrai_dati_scheda(page)
+                print(f" -> Scheda Veicolo: {len(d1)} campi estratti", flush=True)
+                mappa_totale.update(d1)
 
+                # 2. Figure contrattuali
                 print("2/3 Clic su 'Figure contrattuali'...", flush=True)
                 await clicca_subtab(page, result_frame, "Figure contrattuali")
-                await attendi_primefaces_ajax(page)
+                await page.wait_for_timeout(2500)
+                d2 = await estrai_dati_scheda(page)
+                print(f" -> Scheda Figure Contrattuali: {len(d2)} campi estratti", flush=True)
+                mappa_totale.update(d2)
 
+                # 3. Posizione assicurativa
                 print("3/3 Clic su 'Posizione assicurativa'...", flush=True)
                 await clicca_subtab(page, result_frame, "Posizione assicurativa")
-                await attendi_primefaces_ajax(page)
+                await page.wait_for_timeout(2500)
+                d3 = await estrai_dati_scheda(page)
+                print(f" -> Scheda Posizione Assicurativa: {len(d3)} campi estratti", flush=True)
+                mappa_totale.update(d3)
 
-                # Aggiungiamo il contenuto finale dell'HTML visibile nel buffer
-                for frame in page.frames:
-                    try:
-                        c = await frame.content()
-                        network_buffer.append(c)
-                    except Exception:
-                        continue
+                print("\n================ MAPPA DATI ESTRATTI PER CHIAVE ================", flush=True)
+                for k, v in list(mappa_totale.items())[:30]:
+                    print(f"  [{k}] => {v}", flush=True)
+                print("=================================================================\n", flush=True)
 
-                testo_completo_rete = "\n".join(network_buffer)
-
-                print("\n================ BUFFER DI RETE ACQUISITO (CATTURATE RISPOSTE AJAX) ================", flush=True)
-                print(f"Dimensioni testo catturato: {len(testo_completo_rete)} caratteri", flush=True)
-                print("====================================================================================\n", flush=True)
-
-                # --- ESTRAZIONE DATI TRAMITE REGEX SU BUFFER DI RETE ---
-                cf = estrai_con_regex(r"\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b", testo_completo_rete)
+                # Mappatura delle variabili
+                cf = cerca_in_mappa(mappa_totale, ["Cod.Fisc/P.IVA", "Cod.Fisc", "C.F.", "Codice Fiscale"])
+                nome = cerca_in_mappa(mappa_totale, ["Nominativo", "Cliente"])
+                data_nas = cerca_in_mappa(mappa_totale, ["Data di nascita", "Nato il"])
+                residenza = cerca_in_mappa(mappa_totale, ["Indirizzo", "Residenza"])
+                prov = cerca_in_mappa(mappa_totale, ["Prov", "Provincia"])
+                cap = cerca_in_mappa(mappa_totale, ["CAP"])
                 
-                nome = estrai_con_regex(r"(?:Nominativo|PROPRIETARIO|Cliente)\s*[:=>\n\t\"\'<-]+\s*([A-Z\s\']{3,50})", testo_completo_rete)
-                if not nome:
-                    nome = estrai_con_regex(r"valore-stampato-iniettato[^>]*>\s*===>\s*([A-Z\s\']+)\s*<===", testo_completo_rete)
+                marca = cerca_in_mappa(mappa_totale, ["Codice marca", "Marca"])
+                modello = cerca_in_mappa(mappa_totale, ["Descrizione modello", "Modello"])
+                kw_raw = cerca_in_mappa(mappa_totale, ["KW"])
+                data_immat = cerca_in_mappa(mappa_totale, ["Data prima immatricolazione", "Immatricolazione"])
+                alimentazione_raw = cerca_in_mappa(mappa_totale, ["Alimentazione"])
 
-                data_nas = estrai_con_regex(r"(?:Data di nascita|Nato il)\s*[:=>\n\t\"\'<-]+\s*(\d{2}/\d{2}/\d{4})", testo_completo_rete)
-                residenza = estrai_con_regex(r"(?:Indirizzo|Residenza)\s*[:=>\n\t\"\'<-]+\s*([^<>\n\r]{5,60})", testo_completo_rete)
-                prov = estrai_con_regex(r"(?:Prov|Provincia)\s*[:=>\n\t\"\'<-]+\s*([A-Z]{2})\b", testo_completo_rete)
-                cap = estrai_con_regex(r"\b(\d{5})\b", testo_completo_rete)
-                
-                marca = estrai_con_regex(r"(?:Codice marca|Marca)\s*[:=>\n\t\"\'<-]+\s*([^<>\n\r]{2,40})", testo_completo_rete)
-                modello = estrai_con_regex(r"(?:Descrizione modello|Modello)\s*[:=>\n\t\"\'<-]+\s*([^<>\n\r]{2,60})", testo_completo_rete)
-                kw_raw = estrai_con_regex(r"\bKW\s*[:=>\n\t\"\'<-]+\s*(\d+(?:[.,]\d+)?)", testo_completo_rete)
-                data_immat = estrai_con_regex(r"(?:Data prima immatricolazione|Immatricolazione)\s*[:=>\n\t\"\'<-]+\s*(\d{2}/\d{2}/\d{4})", testo_completo_rete)
-                alimentazione_raw = estrai_con_regex(r"(?:Alimentazione)\s*[:=>\n\t\"\'<-]+\s*([A-Z/]{3,20})", testo_completo_rete)
-
-                # Parse KW numerico per Airtable
+                # Conversione numerica KW
                 kw = None
                 if kw_raw:
                     clean_kw = re.sub(r'[^\d.,]', '', kw_raw).replace(',', '.')
@@ -380,7 +415,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                         except ValueError:
                             kw = None
 
-                # Format Single-Select Alimentazione
+                # Single-Select Alimentazione
                 alimentazione = ""
                 if "BENZINA" in alimentazione_raw.upper():
                     alimentazione = "Benzina"
@@ -393,8 +428,8 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 elif "ELETTRICA" in alimentazione_raw.upper() or "IBRIDA" in alimentazione_raw.upper():
                     alimentazione = "Ibrida/Elettrica"
 
-                classe_cu = estrai_con_regex(r"(?:Classe CU|CU di assegnazione)\s*[:=>\n\t\"\'<-]+\s*(\d{1,2})\b", testo_completo_rete)
-                compagnia_provenienza = estrai_con_regex(r"(?:Impresa|Compagnia di provenienza|Compagnia)\s*[:=>\n\t\"\'<-]+\s*([^<>\n\r]{3,50})", testo_completo_rete)
+                classe_cu = cerca_in_mappa(mappa_totale, ["Classe CU di assegnazione", "Classe CU", "CU di assegnazione", "CU"])
+                compagnia_provenienza = cerca_in_mappa(mappa_totale, ["Impresa", "Compagnia di provenienza", "Compagnia"])
 
                 nome_clean = pulisci_valore(nome)
                 cf_clean = pulisci_valore(cf)
@@ -402,9 +437,9 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 modello_clean = pulisci_valore(modello)
                 compagnia_clean = pulisci_valore(compagnia_provenienza)
 
-                print(f"VALORI REALI ESTRATTI DAL RETE -> Nome: '{nome_clean}', CF: '{cf_clean}', Marca: '{marca_clean}', Modello: '{modello_clean}', KW: {kw}, CU: '{classe_cu}', Compagnia: '{compagnia_clean}'", flush=True)
+                print(f"VALORI REALI ESTRATTI -> Nome: '{nome_clean}', CF: '{cf_clean}', Marca: '{marca_clean}', Modello: '{modello_clean}', KW: {kw}, CU: '{classe_cu}', Compagnia: '{compagnia_clean}'", flush=True)
 
-                # 4. SALVATAGGIO SU AIRTABLE CON CLEANUP ANTI-422
+                # 4. SALVATAGGIO SU AIRTABLE CON CLEANUP ANTI-422 (Max 5 tentativi per evitare cicli infiniti)
                 print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
                 
                 raw_fields = {
@@ -428,25 +463,25 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 cleaned_fields = {k: v for k, v in raw_fields.items() if v is not None and v != ""}
 
-                while True:
+                for _ in range(5):
                     res = requests.patch(url_trattativa, headers=headers, json={"fields": cleaned_fields})
                     if res.status_code == 200:
                         print(f"[{record_id}] ESTRAZIONE E MAPPATURA COMPLETATE CON SUCCESSO!", flush=True)
                         break
                     elif res.status_code == 422:
                         err_text = res.text
-                        print(f"Rilevato errore campo Airtable 422 ({err_text}), sanificazione automatica...", flush=True)
+                        print(f"Rilevato errore campo Airtable 422 ({err_text}), sanificazione...", flush=True)
                         
                         unk_match = re.search(r'Unknown field name:\s*\\?"([^\\"]+)\\?"', err_text)
                         val_match = re.search(r'Field\s*\\?"([^\\"]+)\\?"\s*cannot accept', err_text, re.IGNORECASE)
                         
                         if unk_match:
                             bad_field = unk_match.group(1)
-                            print(f"Campo '{bad_field}' non trovato su Airtable. Rimuovo e riprovo...", flush=True)
+                            print(f"Rimuovo campo non riconosciuto '{bad_field}'...", flush=True)
                             cleaned_fields.pop(bad_field, None)
                         elif val_match:
                             bad_field = val_match.group(1)
-                            print(f"Valore per il campo '{bad_field}' rifiutato da Airtable. Rimuovo e riprovo...", flush=True)
+                            print(f"Rimuovo campo con valore non valido '{bad_field}'...", flush=True)
                             cleaned_fields.pop(bad_field, None)
                         else:
                             cleaned_fields.pop("KW", None)
