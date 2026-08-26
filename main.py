@@ -84,6 +84,7 @@ async def invia_form_prosegui(page, target_frame) -> bool:
     return False
 
 async def cattura_testo_globale(page) -> str:
+    """Estrae sia il testo visibile sia il valore SELEZIONATO nei campi input/select di ogni iframe."""
     testo_aggregato = []
     for frame in page.frames:
         try:
@@ -96,15 +97,23 @@ async def cattura_testo_globale(page) -> str:
                 result.push("=== INPUT & SELECT VALUES ===");
                 const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
                 inputs.forEach(i => {
-                    let val = i.value || "";
-                    if (val.trim() !== "" && val.trim() !== "125") {
+                    let val = "";
+                    if (i.tagName.toLowerCase() === 'select') {
+                        if (i.selectedIndex >= 0 && i.options[i.selectedIndex]) {
+                            val = i.options[i.selectedIndex].text || "";
+                        }
+                    } else {
+                        val = i.value || "";
+                    }
+                    val = val.trim();
+                    if (val !== "" && val !== "125" && !val.includes("=== ")) {
                         let name = i.name || i.id || "";
                         let closestTd = i.closest('td');
                         let label = "";
                         if (closestTd && closestTd.previousElementSibling) {
                             label = closestTd.previousElementSibling.innerText.trim();
                         }
-                        result.push(`[FIELD] ${label} (${name}) => ${val.trim()}`);
+                        result.push(`[FIELD] ${label} (${name}) => ${val}`);
                     }
                 });
                 return result.join("\\n");
@@ -121,6 +130,15 @@ def estrai_con_regex(pattern: str, testo: str, default: str = "") -> str:
         v = m.group(1).strip()
         return v if v != "125" else default
     return default
+
+def pulisci_campo_airtable(valore: str, scarti: list) -> str:
+    """Evita l'invio di testi di default o stringhe multilinea su Airtable."""
+    if not valore:
+        return ""
+    v = valore.strip()
+    if v in scarti or "\n" in v or len(v) > 100:
+        return ""
+    return v
 
 async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: str):
     async with bot_semaphore:
@@ -252,19 +270,16 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 print(f"Compilazione CIP (125) e Targa ('{targa_spazi}')...", flush=True)
                 
-                # Compilazione sicura tramite JavaScript sul DOM dell'iframe
                 data_oggi = datetime.now().strftime("%d/%m/%Y")
                 
                 await target_frame.evaluate('''
                     ({cipVal, targaVal, dataVal}) => {
-                        // 1. Ripristina/Assicura campo Effetto Polizza con data valida
                         const dateInput = document.querySelector('input[id*="eftPol"], input[name*="eftPol"]');
                         if (dateInput && dateInput.value.includes(' ')) {
                             dateInput.value = dataVal;
                             dateInput.dispatchEvent(new Event('change', { bubbles: true }));
                         }
 
-                        // 2. Inserimento CIP
                         const cipInput = document.querySelector('input[id*="cSagPrp"], input[name*="cSagPrp"]');
                         if (cipInput) {
                             cipInput.value = cipVal;
@@ -272,7 +287,6 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                             cipInput.dispatchEvent(new Event('change', { bubbles: true }));
                         }
 
-                        // 3. Inserimento Targa (Escludendo rigorosamente il campo data eftPol)
                         const allInputs = Array.from(document.querySelectorAll('input[type="text"]:not([disabled])'));
                         let targaInput = allInputs.find(i => {
                             const idName = (i.id + ' ' + i.name).toLowerCase();
@@ -317,13 +331,16 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     await asyncio.sleep(1)
 
                 if result_frame:
-                    print("RISULTATI PREVENTIVO RILEVATI! Apertura schede...", flush=True)
-                    for tab_name in ["DATI ASSICURATIVI", "Figure contrattuali", "Posizione assicurativa", "Veicolo"]:
+                    print("RISULTATI PREVENTIVO RILEVATI! Apertura sequenziale delle schede AJAX...", flush=True)
+                    
+                    # Clic guidato con pause di caricamento AJAX su ciascun tab
+                    for tab_name in ["DATI ASSICURATIVI", "Veicolo/natante", "Figure contrattuali", "Posizione assicurativa"]:
                         try:
                             t = result_frame.locator(f'text="{tab_name}"').first
-                            if await t.is_visible(timeout=1000):
+                            if await t.is_visible(timeout=1500):
+                                print(f"Apertura scheda: {tab_name}...", flush=True)
                                 await t.click(force=True)
-                                await page.wait_for_timeout(1200)
+                                await page.wait_for_timeout(2500) # Attesa rendering AJAX
                         except Exception:
                             continue
                 else:
@@ -348,12 +365,24 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 modello = estrai_con_regex(r"(?:Descrizione modello|Modello)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
                 kw = estrai_con_regex(r"\bKW\s*[:=>\n\-]+\s*(\d+(?:[.,]\d+)?)", testo_completo)
                 data_immat = estrai_con_regex(r"(?:Data prima immatricolazione|Immatricolazione)\s*[:=>\n\-]+\s*(\d{2}/\d{2}/\d{4})", testo_completo)
-                alimentazione = estrai_con_regex(r"(?:Alimentazione)\s*[:=>\n\-]+\s*([A-Z0-9\s]+)", testo_completo)
+                alimentazione_raw = estrai_con_regex(r"(?:Alimentazione)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
                 
+                # Normalizzazione Alimentazione
+                alimentazione = ""
+                for p in ["BENZINA", "DIESEL", "ELETTRICA", "GPL", "IBRIDA", "METANO"]:
+                    if p in alimentazione_raw.upper():
+                        alimentazione = p
+                        break
+
                 classe_cu = estrai_con_regex(r"(?:Classe CU|CU di assegnazione|CU)\s*[:=>\n\-]+\s*(\d+)", testo_completo)
                 compagnia_provenienza = estrai_con_regex(r"(?:Impresa|Compagnia di provenienza|Compagnia)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
 
-                print(f"VALORI ESTRATTI CON DUMP -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
+                # Pulizia valori da inviare ad Airtable
+                marca_clean = pulisci_campo_airtable(marca, ["Cerca", "Codice marca"])
+                modello_clean = pulisci_campo_airtable(modello, ["Descrizione modello", "Modello"])
+                compagnia_clean = pulisci_campo_airtable(compagnia_provenienza, ["Impresa", "Compagnia"])
+
+                print(f"VALORI PULITI ESTRATTI -> Nome: '{nome}', CF: '{cf}', Marca: '{marca_clean}', Modello: '{modello_clean}', Alimentazione: '{alimentazione}', CU: '{classe_cu}', Compagnia: '{compagnia_clean}'", flush=True)
 
                 # 4. SALVATAGGIO SU AIRTABLE
                 print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
@@ -363,13 +392,13 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     "cl_datanascita": data_nas.strip(),
                     "cl_indirizzo": residenza.strip(),
                     "cl_provincia": prov.strip(),
-                    "Marca": marca.strip(),
-                    "Modello": modello.strip(),
+                    "Marca": marca_clean,
+                    "Modello": modello_clean,
                     "KW": kw.strip(),
                     "Data immatricolazione": data_immat.strip(),
-                    "Alimentazione": alimentazione.strip(),
+                    "Alimentazione": alimentazione,
                     "Classe CU": classe_cu.strip(),
-                    "Compagnia Provenienza": compagnia_provenienza.strip(),
+                    "Compagnia Provenienza": compagnia_clean,
                     "Stato Bot Estrazione": "Dati Estratti"
                 }
 
@@ -380,7 +409,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 if res.status_code != 200:
                     print(f"Risposta Error Airtable: {res.text}", flush=True)
                 res.raise_for_status()
-                print(f"[{record_id}] ESTRAZIONE COMPLETATA CON SUCCESSO!", flush=True)
+                print(f"[{record_id}] ESTRAZIONE E MAPPATURA COMPLETATE CON SUCCESSO!", flush=True)
 
             except Exception as e:
                 err_msg = str(e)[:250]
