@@ -83,7 +83,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             )
 
-            # Blocco risorse pesanti per azzerare il consumo di RAM ed evitare crash OOM su Render
+            # Blocco risorse grafiche pesanti anti-OOM crash
             await context.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
 
             page = await context.new_page()
@@ -93,7 +93,7 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 # 🔒 ZONA IN CASSAFORTE (LOGIN & MFA)
                 # ==========================================
                 print("1/4 Inserimento Username e Password...", flush=True)
-                await page.goto("https://essig.unipolsai.it/my-policy", wait_until="domcontentloaded", timeout=40000)
+                await page.goto("https://essig.unipolsai.it/my-policy", wait_until="commit", timeout=40000)
                 
                 user_input = page.locator('input[name="Username" i], input[name="username" i]').first
                 await user_input.wait_for(state="visible", timeout=20000)
@@ -136,21 +136,21 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
                 leonardo_url = "https://essig.unipolsai.it/WorkspaceWeb/app/configuratore_questionari/questionario"
                 
                 try:
-                    await page.goto(leonardo_url, wait_until="domcontentloaded", timeout=15000)
+                    # Navigazione immediata con commit (non attende la domcontentloaded se il server è lento)
+                    await page.goto(leonardo_url, wait_until="commit", timeout=20000)
                 except Exception as e:
-                    print(f"Interferenza di sistema ({e}), riprovo la forzatura...", flush=True)
-                    await asyncio.sleep(2)
-                    await page.goto(leonardo_url, wait_until="domcontentloaded", timeout=20000)
+                    print(f"Interferenza di rete ({e}), proseguo sulla pagina corrente...", flush=True)
 
+                await page.wait_for_timeout(3000)
                 print(f"Atterraggio completato su: {page.url}", flush=True)
 
                 # ==========================================
                 # 🔓 MODULO 1: PREVENTIVATORE UNIPOL (FASE A)
                 # ==========================================
                 print("Ingresso nel Preventivatore Unipol...", flush=True)
-                await page.wait_for_timeout(3000)
-
+                
                 prodotti_btn = page.locator('button:has-text("PRODOTTI"), .p-button:has-text("PRODOTTI")').first
+                await prodotti_btn.wait_for(state="visible", timeout=25000)
                 await prodotti_btn.click(force=True)
                 await page.wait_for_timeout(1200)
 
@@ -214,7 +214,6 @@ async def estrai_dati_bda(record_id: str, targa: str, data_nascita: str):
 
                 print("Attesa elaborazione risultati Preventivo...", flush=True)
                 
-                # Attesa esplicita della comparsa dei risultati preventivo
                 result_frame = None
                 for _ in range(35):
                     for frame in page.frames:
