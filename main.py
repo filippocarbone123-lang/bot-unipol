@@ -102,66 +102,80 @@ async def clicca_subtab(page, result_frame, nome_tab: str) -> bool:
                 continue
     return False
 
-async def estrai_tutti_i_campi_dalla_pagina(page) -> dict:
-    """Estrae i dati da OGNI elemento (inclusi input readonly, disabled, hidden, select e span) di ciascun iframe."""
+async def estrai_ibrido_frame(page) -> tuple[dict, str]:
+    """Scansiona tutti i contenitori (tabelle, griglie PrimeFaces, div) e restituisce mappa dati e testo completo."""
     mappa = {}
+    testo_cumulativo = []
+    
     for frame in page.frames:
         try:
-            dati = await frame.evaluate('''() => {
+            res_frame, body_txt = await frame.evaluate('''() => {
                 let res = {};
-                const rows = Array.from(document.querySelectorAll('tr'));
+                let bTxt = document.body ? document.body.innerText : '';
                 
-                rows.forEach(r => {
-                    const tds = Array.from(r.querySelectorAll('td, th'));
-                    for (let i = 0; i < tds.length - 1; i++) {
-                        let label = (tds[i].innerText || tds[i].textContent || '').trim().replace(/[:*]/g, '');
-                        
-                        // Scarta etichette nulle, numeriche o troppo lunghe
-                        if (!label || label.length < 2 || label.length > 60 || /^\\d+$/.test(label) || label.includes(' - ')) continue;
-
-                        let valTd = tds[i + 1];
-                        if (!valTd) continue;
-
-                        let val = '';
-                        // 1. Cerca dentro QUALSIASI input (anche disabled o readonly) o select
-                        let inp = valTd.querySelector('input, select, textarea');
-                        if (inp) {
-                            if (inp.tagName.toLowerCase() === 'select') {
-                                val = inp.options[inp.selectedIndex] ? inp.options[inp.selectedIndex].text : inp.value;
-                            } else {
-                                val = inp.value || inp.getAttribute('value') || '';
-                            }
-                        }
-
-                        // 2. Cerca dentro etichette PrimeFaces
-                        if (!val || !val.trim()) {
-                            let pf = valTd.querySelector('.ui-selectonemenu-label, .ui-selectonemenu-title, .ui-outputlabel');
-                            if (pf) val = pf.innerText || pf.textContent || '';
-                        }
-
-                        // 3. Cerca testo semplice nella cella
-                        if (!val || !val.trim()) {
-                            val = valTd.innerText || valTd.textContent || '';
-                        }
-
-                        val = (val || '').trim();
-                        if (val && 
-                            val !== '125' && 
-                            !val.toLowerCase().includes('cerca') && 
+                const inserisci = (lbl, val) => {
+                    if (!lbl || !val) return;
+                    lbl = lbl.trim().replace(/[:*]/g, '');
+                    val = val.trim();
+                    if (/^\\d+$/.test(lbl) || lbl.includes(' - ') || val.includes(' - ')) return;
+                    if (lbl.length > 1 && lbl.length < 60 && val.length < 150) {
+                        let valLow = val.toLowerCase();
+                        if (!valLow.includes('seleziona') && 
+                            !valLow.includes('cerca') && 
                             val !== 'ui-button' && 
-                            !val.includes('javax.faces') &&
-                            !val.includes('\\n')) {
-                            res[label] = val;
+                            val !== '125' && 
+                            !val.includes('javax.faces')) {
+                            res[lbl] = val;
+                        }
+                    }
+                };
+
+                // 1. Griglie e Tabelle
+                const containers = Array.from(document.querySelectorAll('tr, .ui-panelgrid-cell, .ui-g, div.p-grid'));
+                containers.forEach(c => {
+                    const children = Array.from(c.children);
+                    if (children.length >= 2) {
+                        for (let i = 0; i < children.length - 1; i++) {
+                            let lbl = children[i].innerText || children[i].textContent || '';
+                            let valEl = children[i + 1];
+                            let val = '';
+                            let inp = valEl.querySelector('input, select, textarea');
+                            if (inp) {
+                                if (inp.tagName.toLowerCase() === 'select') {
+                                    val = inp.options[inp.selectedIndex] ? inp.options[inp.selectedIndex].text : '';
+                                } else {
+                                    val = inp.value || inp.getAttribute('value') || '';
+                                }
+                            } else {
+                                val = valEl.innerText || valEl.textContent || '';
+                            }
+                            inserisci(lbl, val);
                         }
                     }
                 });
-                return res;
+
+                // 2. Input/Select con etichetta adiacente
+                const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
+                inputs.forEach(i => {
+                    let val = i.tagName.toLowerCase() === 'select' ? 
+                        (i.options[i.selectedIndex] ? i.options[i.selectedIndex].text : '') : 
+                        (i.value || i.getAttribute('value') || '');
+                    let parent = i.closest('td, th, div');
+                    let labelEl = parent ? parent.previousElementSibling : null;
+                    let lbl = labelEl ? (labelEl.innerText || labelEl.textContent || '') : '';
+                    inserisci(lbl, val);
+                });
+
+                return [res, bTxt];
             }''')
-            if dati:
-                mappa.update(dati)
+            if res_frame:
+                mappa.update(res_frame)
+            if body_txt:
+                testo_cumulativo.append(body_txt)
         except Exception:
             continue
-    return mappa
+            
+    return mappa, "\n".join(testo_cumulativo)
 
 def cerca_in_mappa(mappa: dict, keywords: list) -> str:
     scarti = ["proprietario", "contraente", "usufruttuario", "conducente", "aggiungi una figura", "0", "cerca"]
@@ -376,43 +390,52 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     result_frame = target_frame
 
                 mappa_totale = {}
+                testo_globale = ""
+
                 print("RISULTATI PREVENTIVO RILEVATI! Lettura schede AJAX...", flush=True)
 
-                # --- SCHEDA 1: DATI ASSICURATIVI -> Veicolo ---
+                # TAB 1: DATI ASSICURATIVI -> Veicolo
                 print("1/3 Clic su 'DATI ASSICURATIVI' e 'Veicolo/natante'...", flush=True)
                 await clicca_subtab(page, result_frame, "DATI ASSICURATIVI")
                 await page.wait_for_timeout(1000)
                 await clicca_subtab(page, result_frame, "Veicolo")
-                await page.wait_for_timeout(2500) # Attesa carica AJAX
-                dati_veic = await estrai_tutti_i_campi_dalla_pagina(page)
-                print(f" -> Letti {len(dati_veic)} campi da Veicolo", flush=True)
-                mappa_totale.update(dati_veic)
+                await page.wait_for_timeout(2500)
+                m1, txt1 = await estrai_ibrido_frame(page)
+                mappa_totale.update(m1)
+                testo_globale += "\n" + txt1
 
-                # --- SCHEDA 2: Figure contrattuali ---
+                # TAB 2: Figure contrattuali
                 print("2/3 Clic su 'Figure contrattuali'...", flush=True)
                 await clicca_subtab(page, result_frame, "Figure contrattuali")
-                await page.wait_for_timeout(2500) # Attesa carica AJAX
-                dati_fig = await estrai_tutti_i_campi_dalla_pagina(page)
-                print(f" -> Letti {len(dati_fig)} campi da Figure Contrattuali", flush=True)
-                mappa_totale.update(dati_fig)
+                await page.wait_for_timeout(2500)
+                m2, txt2 = await estrai_ibrido_frame(page)
+                mappa_totale.update(m2)
+                testo_globale += "\n" + txt2
 
-                # --- SCHEDA 3: Posizione assicurativa ---
+                # TAB 3: Posizione assicurativa
                 print("3/3 Clic su 'Posizione assicurativa'...", flush=True)
                 await clicca_subtab(page, result_frame, "Posizione assicurativa")
-                await page.wait_for_timeout(2500) # Attesa carica AJAX
-                dati_pos = await estrai_tutti_i_campi_dalla_pagina(page)
-                print(f" -> Letti {len(dati_pos)} campi da Posizione Assicurativa", flush=True)
-                mappa_totale.update(dati_pos)
+                await page.wait_for_timeout(2500)
+                m3, txt3 = await estrai_ibrido_frame(page)
+                mappa_totale.update(m3)
+                testo_globale += "\n" + txt3
 
-                print("\n================ MAPPA COMPLETA CAMPI TROVATI ================", flush=True)
-                for k, v in list(mappa_totale.items())[:30]:
-                    print(f"  [{k}] => {v}", flush=True)
-                print("===============================================================\n", flush=True)
-
-                # Estrattore mirato dei valori
+                # --- MAPPATURA IBRIDA (DOM + REGEX SU TESTO GLOBALE) ---
                 cf = cerca_in_mappa(mappa_totale, ["Cod.Fisc/P.IVA", "Cod.Fisc", "C.F.", "Codice Fiscale"])
+                if not cf:
+                    m = re.search(r"\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b", testo_globale)
+                    if m: cf = m.group(1)
+
                 nome = cerca_in_mappa(mappa_totale, ["Nominativo", "Cliente"])
+                if not nome:
+                    m = re.search(r"(?:Nominativo|PROPRIETARIO|Cliente)\s*[:=>\n\t\-]*\s*([A-Z\s\']{3,50})", testo_globale)
+                    if m: nome = m.group(1)
+
                 data_nas = cerca_in_mappa(mappa_totale, ["Data di nascita", "Nato il"])
+                if not data_nas:
+                    m = re.search(r"(?:Data di nascita|Nato il)\s*[:=>\n\t\-]*\s*(\d{2}/\d{2}/\d{4})", testo_globale)
+                    if m: data_nas = m.group(1)
+
                 residenza = cerca_in_mappa(mappa_totale, ["Indirizzo", "Residenza"])
                 prov = cerca_in_mappa(mappa_totale, ["Prov", "Provincia"])
                 cap = cerca_in_mappa(mappa_totale, ["CAP"])
@@ -422,8 +445,8 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 kw_raw = cerca_in_mappa(mappa_totale, ["KW"])
                 data_immat = cerca_in_mappa(mappa_totale, ["Data prima immatricolazione", "Immatricolazione"])
                 alimentazione_raw = cerca_in_mappa(mappa_totale, ["Alimentazione"])
-                
-                # Conversione numerica di KW per Airtable
+
+                # Parse KW per Airtable
                 kw = None
                 if kw_raw:
                     clean_kw = re.sub(r'[^\d.,]', '', kw_raw).replace(',', '.')
