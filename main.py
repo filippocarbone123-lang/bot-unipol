@@ -65,86 +65,52 @@ async def invia_form_prosegui(page, target_frame) -> bool:
                 continue
     return False
 
-async def attiva_tab_primefaces(target_frame, nome_tab: str) -> bool:
-    """Sblocca e forza il clic sui pannelli PrimeFaces/JSF invocando l'evento JS o cliccando l'elemento <li>."""
-    try:
-        return await target_frame.evaluate('''(tabName) => {
-            const tabs = Array.from(document.querySelectorAll('.ui-tabs-nav li a, ul.ui-tabs-nav li, a[role="tab"]'));
-            const match = tabs.find(t => (t.innerText || t.textContent || '').toLowerCase().includes(tabName.toLowerCase()));
-            if (match) {
-                match.click();
-                if (match.parentElement) match.parentElement.click();
-                return true;
-            }
-            return false;
-        }''', nome_tab)
-    except Exception:
-        return False
+async def clicca_subtab(page, result_frame, nome_tab: str) -> bool:
+    frames = [result_frame] + [f for f in page.frames if f != result_frame]
+    for frame in frames:
+        if not frame:
+            continue
+        for selector in [
+            f'a:has-text("{nome_tab}")',
+            f'button:has-text("{nome_tab}")',
+            f'span:has-text("{nome_tab}")',
+            f'td:has-text("{nome_tab}")',
+            f'text="{nome_tab}"'
+        ]:
+            try:
+                el = frame.locator(selector).first
+                if await el.is_visible(timeout=600):
+                    await el.click(force=True)
+                    return True
+            except Exception:
+                continue
+    return False
 
-async def estrai_pannello_attivo(target_frame) -> dict:
-    """Estrae i dati esclusivamente dal pannello PrimeFaces visibile, ignorando le tabelle di fondo."""
-    try:
-        return await target_frame.evaluate('''() => {
-            let res = {};
-            // Seleziona solo il pannello attivo
-            const activePanel = document.querySelector('.ui-tabs-panel:not(.ui-helper-hidden)') || document.body;
-            const rows = Array.from(activePanel.querySelectorAll('tr, .ui-panelgrid-cell'));
+async def estrai_testo_emulazione_stampa(page) -> str:
+    """Attiva il layout CSS di stampa ed estrae il testo appiattito da ogni frame."""
+    await page.emulate_media(media="print")
+    await asyncio.sleep(1)
+    
+    testi = []
+    for frame in page.frames:
+        try:
+            txt = await frame.evaluate("() => document.body ? document.body.innerText : ''")
+            if txt and len(txt.strip()) > 30:
+                testi.append(txt.strip())
+        except Exception:
+            continue
+            
+    await page.emulate_media(media="screen")
+    return "\n--- SEPARATORE SCHEDA ---\n".join(testi)
 
-            rows.forEach(r => {
-                const cells = Array.from(r.querySelectorAll('td, th, div.ui-g-6'));
-                if (cells.length >= 2) {
-                    for (let i = 0; i < cells.length - 1; i += 2) {
-                        let label = (cells[i].innerText || cells[i].textContent || '').trim().replace(/[:*]/g, '');
-                        // Esclude cavalli fiscali e tabelle numeriche
-                        if (!label || label.length < 2 || label.length > 50 || /^\\d+$/.test(label) || label.includes(' - ')) continue;
-
-                        let valTd = cells[i + 1];
-                        if (!valTd) continue;
-
-                        let val = '';
-                        let inp = valTd.querySelector('input, select, textarea');
-                        if (inp) {
-                            if (inp.tagName.toLowerCase() === 'select') {
-                                val = inp.options[inp.selectedIndex] ? inp.options[inp.selectedIndex].text : '';
-                            } else {
-                                val = inp.value || inp.getAttribute('value') || '';
-                            }
-                        }
-                        if (!val || !val.trim()) {
-                            let pf = valTd.querySelector('.ui-selectonemenu-label, .ui-selectonemenu-title, .ui-outputlabel');
-                            if (pf) val = pf.innerText || pf.textContent || '';
-                        }
-                        if (!val || !val.trim()) {
-                            val = valTd.innerText || valTd.textContent || '';
-                        }
-
-                        val = (val || '').trim();
-                        if (val && 
-                            val !== '125' && 
-                            !val.toLowerCase().includes('cerca') && 
-                            !val.toLowerCase().includes('seleziona') &&
-                            val !== 'ui-button' && 
-                            !val.includes('javax.faces') &&
-                            !val.includes('\\n')) {
-                            res[label] = val;
-                        }
-                    }
-                }
-            });
-            return res;
-        }''')
-    except Exception:
-        return {}
-
-def cerca_in_mappa(mappa: dict, keywords: list) -> str:
-    scarti = ["proprietario", "contraente", "usufruttuario", "conducente", "aggiungi una figura", "0", "cerca", "m20", "m30", "m40"]
-    for k_map, v_map in mappa.items():
-        for kw in keywords:
-            if kw.lower() in k_map.lower():
-                val = v_map.strip() if v_map else ""
-                if val and "\n" not in val and val.lower() not in scarti:
-                    return val
-    return ""
+def estrai_con_regex(pattern: str, testo: str, default: str = "") -> str:
+    m = re.search(pattern, testo, re.IGNORECASE | re.MULTILINE)
+    if m and m.group(1):
+        v = m.group(1).strip()
+        scarti = ["125", "m20", "m30", "m40", "m50", "M21", "M26", "M24", "cerca", "seleziona"]
+        if v.lower() not in scarti and not v.startswith("javax.faces"):
+            return v
+    return default
 
 def pulisci_valore(valore: str) -> str:
     if not valore:
@@ -166,7 +132,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
         targa_spazi = formatta_targa_spazi(targa)
         targa_pulita = targa.replace(" ", "").upper()
 
-        print(f"[{record_id}] Avvio estrazione PrimeFaces mirata per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
+        print(f"[{record_id}] Avvio estrazione Layout Stampa per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
         requests.patch(
             url_trattativa,
             headers=headers,
@@ -328,7 +294,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 print("Invio form maschera con clic su Prosegui...", flush=True)
                 await invia_form_prosegui(page, target_frame)
 
-                # 3. ATTESA RISULTATI E APERTURA DELLE SCHEDE PRIMEFACES
+                # 3. ATTESA RISULTATI ED ESTRAZIONE LAYOUT STAMPA
                 print("Attesa calcolo ed elaborazione del Preventivo (fino a 40s)...", flush=True)
                 result_frame = None
                 for _ in range(40):
@@ -346,53 +312,46 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 if not result_frame:
                     result_frame = target_frame
 
-                mappa_totale = {}
-                print("RISULTATI PREVENTIVO RILEVATI! Clic nativo PrimeFaces ed estrazione...", flush=True)
+                print("RISULTATI PREVENTIVO RILEVATI! Lettura layout di stampa...", flush=True)
+                testo_stampa_totale = ""
 
                 # 1. Veicolo
                 print("1/3 Clic su 'DATI ASSICURATIVI' / 'Veicolo'...", flush=True)
-                await attiva_tab_primefaces(result_frame, "DATI ASSICURATIVI")
+                await clicca_subtab(page, result_frame, "DATI ASSICURATIVI")
                 await page.wait_for_timeout(1000)
-                await attiva_tab_primefaces(result_frame, "Veicolo")
+                await clicca_subtab(page, result_frame, "Veicolo")
                 await page.wait_for_timeout(2500)
-                d1 = await estrai_pannello_attivo(result_frame)
-                print(f" -> Scheda Veicolo: {len(d1)} campi estratti", flush=True)
-                mappa_totale.update(d1)
+                testo_stampa_totale += "\n" + await estrai_testo_emulazione_stampa(page)
 
                 # 2. Figure contrattuali
                 print("2/3 Clic su 'Figure contrattuali'...", flush=True)
-                await attiva_tab_primefaces(result_frame, "Figure contrattuali")
+                await clicca_subtab(page, result_frame, "Figure contrattuali")
                 await page.wait_for_timeout(2500)
-                d2 = await estrai_pannello_attivo(result_frame)
-                print(f" -> Scheda Figure Contrattuali: {len(d2)} campi estratti", flush=True)
-                mappa_totale.update(d2)
+                testo_stampa_totale += "\n" + await estrai_testo_emulazione_stampa(page)
 
                 # 3. Posizione assicurativa
                 print("3/3 Clic su 'Posizione assicurativa'...", flush=True)
-                await attiva_tab_primefaces(result_frame, "Posizione assicurativa")
+                await clicca_subtab(page, result_frame, "Posizione assicurativa")
                 await page.wait_for_timeout(2500)
-                d3 = await estrai_pannello_attivo(result_frame)
-                print(f" -> Scheda Posizione Assicurativa: {len(d3)} campi estratti", flush=True)
-                mappa_totale.update(d3)
+                testo_stampa_totale += "\n" + await estrai_testo_emulazione_stampa(page)
 
-                print("\n================ MAPPA DATI ESTRATTI PER CHIAVE ================", flush=True)
-                for k, v in list(mappa_totale.items())[:30]:
-                    print(f"  [{k}] => {v}", flush=True)
-                print("=================================================================\n", flush=True)
+                print("\n================ DUMP TESTO LAYOUT STAMPA ================", flush=True)
+                print(testo_stampa_totale[:3000], flush=True)
+                print("===========================================================\n", flush=True)
 
-                # Mappatura delle variabili
-                cf = cerca_in_mappa(mappa_totale, ["Cod.Fisc/P.IVA", "Cod.Fisc", "C.F.", "Codice Fiscale"])
-                nome = cerca_in_mappa(mappa_totale, ["Nominativo", "Cliente"])
-                data_nas = cerca_in_mappa(mappa_totale, ["Data di nascita", "Nato il"])
-                residenza = cerca_in_mappa(mappa_totale, ["Indirizzo", "Residenza"])
-                prov = cerca_in_mappa(mappa_totale, ["Prov", "Provincia"])
-                cap = cerca_in_mappa(mappa_totale, ["CAP"])
+                # Regex di estrazione da testo layout stampa
+                cf = estrai_con_regex(r"\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b", testo_stampa_totale)
+                nome = estrai_con_regex(r"(?:Nominativo|PROPRIETARIO|Cliente)\s*[:=>\n\t\-]+\s*([A-Z\s\']{3,50})", testo_stampa_totale)
+                data_nas = estrai_con_regex(r"(?:Data di nascita|Nato il)\s*[:=>\n\t\-]+\s*(\d{2}/\d{2}/\d{4})", testo_stampa_totale)
+                residenza = estrai_con_regex(r"(?:Indirizzo|Residenza)\s*[:=>\n\t\-]+\s*([^\n\r]{5,60})", testo_stampa_totale)
+                prov = estrai_con_regex(r"(?:Prov|Provincia)\s*[:=>\n\t\-]+\s*([A-Z]{2})\b", testo_stampa_totale)
+                cap = estrai_con_regex(r"\bCAP\s*[:=>\n\t\-]+\s*(\d{5})\b", testo_stampa_totale)
                 
-                marca = cerca_in_mappa(mappa_totale, ["Codice marca", "Marca"])
-                modello = cerca_in_mappa(mappa_totale, ["Descrizione modello", "Modello"])
-                kw_raw = cerca_in_mappa(mappa_totale, ["KW"])
-                data_immat = cerca_in_mappa(mappa_totale, ["Data prima immatricolazione", "Immatricolazione"])
-                alimentazione_raw = cerca_in_mappa(mappa_totale, ["Alimentazione"])
+                marca = estrai_con_regex(r"(?:Codice marca|Marca)\s*[:=>\n\t\-]+\s*([^\n\r]{2,40})", testo_stampa_totale)
+                modello = estrai_con_regex(r"(?:Descrizione modello|Modello)\s*[:=>\n\t\-]+\s*([^\n\r]{2,60})", testo_stampa_totale)
+                kw_raw = estrai_con_regex(r"\bKW\s*[:=>\n\t\-]+\s*(\d+(?:[.,]\d+)?)", testo_stampa_totale)
+                data_immat = estrai_con_regex(r"(?:Data prima immatricolazione|Immatricolazione)\s*[:=>\n\t\-]+\s*(\d{2}/\d{2}/\d{4})", testo_stampa_totale)
+                alimentazione_raw = estrai_con_regex(r"(?:Alimentazione)\s*[:=>\n\t\-]+\s*([A-Z/]{3,20})", testo_stampa_totale)
 
                 # Conversione numerica KW per Airtable
                 kw = None
@@ -406,7 +365,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                         except ValueError:
                             kw = None
 
-                # Format Single-Select Alimentazione
+                # Single-Select Alimentazione
                 alimentazione = ""
                 if "BENZINA" in alimentazione_raw.upper():
                     alimentazione = "Benzina"
@@ -419,8 +378,8 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 elif "ELETTRICA" in alimentazione_raw.upper() or "IBRIDA" in alimentazione_raw.upper():
                     alimentazione = "Ibrida/Elettrica"
 
-                classe_cu = cerca_in_mappa(mappa_totale, ["Classe CU di assegnazione", "Classe CU", "CU di assegnazione", "CU"])
-                compagnia_provenienza = cerca_in_mappa(mappa_totale, ["Impresa", "Compagnia di provenienza", "Compagnia"])
+                classe_cu = estrai_con_regex(r"(?:Classe CU|CU di assegnazione)\s*[:=>\n\t\-]+\s*(\d{1,2})\b", testo_stampa_totale)
+                compagnia_provenienza = estrai_con_regex(r"(?:Impresa|Compagnia di provenienza|Compagnia)\s*[:=>\n\t\-]+\s*([^\n\r]{3,50})", testo_stampa_totale)
 
                 nome_clean = pulisci_valore(nome)
                 cf_clean = pulisci_valore(cf)
@@ -428,7 +387,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 modello_clean = pulisci_valore(modello)
                 compagnia_clean = pulisci_valore(compagnia_provenienza)
 
-                print(f"VALORI REALI ESTRATTI -> Nome: '{nome_clean}', CF: '{cf_clean}', Marca: '{marca_clean}', Modello: '{modello_clean}', KW: {kw}, CU: '{classe_cu}', Compagnia: '{compagnia_clean}'", flush=True)
+                print(f"VALORI ESTRATTI DA STAMPA -> Nome: '{nome_clean}', CF: '{cf_clean}', Marca: '{marca_clean}', Modello: '{modello_clean}', KW: {kw}, CU: '{classe_cu}', Compagnia: '{compagnia_clean}'", flush=True)
 
                 # 4. SALVATAGGIO SU AIRTABLE CON CLEANUP ANTI-422
                 print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
