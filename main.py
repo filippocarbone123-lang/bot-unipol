@@ -24,23 +24,31 @@ def formatta_targa_spazi(targa_raw: str) -> str:
     return clean
 
 async def cattura_testo_globale(page) -> str:
+    """Estrae sia il testo visibile sia tutti i valori contenuti dentro i campi input/select di ogni iframe."""
     testo_aggregato = []
     for frame in page.frames:
         try:
             dump = await frame.evaluate('''() => {
-                let txt = document.body ? document.body.innerText : "";
-                const inputs = Array.from(document.querySelectorAll('input, select'));
+                let result = [];
+                if (document.body) {
+                    result.push("=== BODY TEXT ===");
+                    result.push(document.body.innerText);
+                }
+                result.push("=== INPUT & SELECT VALUES ===");
+                const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
                 inputs.forEach(i => {
-                    let label = i.name || i.id || "campo";
-                    let parentTd = i.closest('td');
-                    if (parentTd && parentTd.previousElementSibling) {
-                        label = parentTd.previousElementSibling.innerText.trim();
-                    }
-                    if (i.value && i.value.trim() !== "") {
-                        txt += `\\n${label} : ${i.value.trim()}`;
+                    let val = i.value || "";
+                    if (val.trim() !== "" && val.trim() !== "125") {
+                        let name = i.name || i.id || "";
+                        let closestTd = i.closest('td');
+                        let label = "";
+                        if (closestTd && closestTd.previousElementSibling) {
+                            label = closestTd.previousElementSibling.innerText.trim();
+                        }
+                        result.push(`[FIELD] ${label} (${name}) => ${val.trim()}`);
                     }
                 });
-                return txt;
+                return result.join("\\n");
             }''')
             if dump and dump.strip():
                 testo_aggregato.append(dump)
@@ -227,11 +235,12 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 # 3. DUMP E SCANSIONE TESTUALE REGEX
                 print("Attesa elaborazione preventivo e apertura schede...", flush=True)
-                await page.wait_for_timeout(6000)
+                await page.wait_for_timeout(8000)
 
+                # Apertura forzata di tutte le schede
                 for frame in page.frames:
                     try:
-                        for tab_name in ["DATI ASSICURATIVI", "Figure contrattuali", "Posizione assicurativa"]:
+                        for tab_name in ["DATI ASSICURATIVI", "Figure contrattuali", "Posizione assicurativa", "Veicolo"]:
                             t = frame.locator(f'text="{tab_name}"').first
                             if await t.is_visible():
                                 await t.click(force=True)
@@ -239,24 +248,30 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     except Exception:
                         continue
 
+                # Cattura e stampa a terminale del Dump Testuale
                 print("Cattura del dump testuale completo...", flush=True)
                 testo_completo = await cattura_testo_globale(page)
 
-                nome = estrai_con_regex(r"(?:Nominativo|PROPRIETARIO)\s*[:\n\-]+\s*([A-Z\s\']+)", testo_completo)
-                cf = estrai_con_regex(r"(?:Cod\.?\s*Fisc\.?|C\.F\.?)\s*[:\n\-]+\s*([A-Z0-9]{16})", testo_completo)
-                data_nas = estrai_con_regex(r"(?:Data di nascita)\s*[:\n\-]+\s*(\d{2}/\d{2}/\d{4})", testo_completo)
-                residenza = estrai_con_regex(r"(?:Indirizzo|Residenza)\s*[:\n\-]+\s*([^\n]+)", testo_completo)
-                prov = estrai_con_regex(r"(?:Prov|Provincia)\s*[:\n\-]+\s*([A-Z]{2})\b", testo_completo)
-                cap = estrai_con_regex(r"\bCAP\s*[:\n\-]+\s*(\d{5})\b", testo_completo)
+                print("\n==================== STAMPA DUMP TESTO UNIPOL ====================", flush=True)
+                print(testo_completo[:3500], flush=True) # Stampa fino a 3500 caratteri nei log di Render
+                print("===================================================================\n", flush=True)
+
+                # Regex universali di estrazione
+                cf = estrai_con_regex(r"\b([A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z])\b", testo_completo)
+                nome = estrai_con_regex(r"(?:Nominativo|PROPRIETARIO|Cliente)\s*[:=>\n\-]+\s*([A-Z\s\']+)", testo_completo)
+                data_nas = estrai_con_regex(r"(?:Data di nascita|Nato il)\s*[:=>\n\-]+\s*(\d{2}/\d{2}/\d{4})", testo_completo)
+                residenza = estrai_con_regex(r"(?:Indirizzo|Residenza)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
+                prov = estrai_con_regex(r"(?:Prov|Provincia)\s*[:=>\n\-]+\s*([A-Z]{2})\b", testo_completo)
+                cap = estrai_con_regex(r"\b(\d{5})\b", testo_completo)
                 
-                marca = estrai_con_regex(r"(?:Codice marca|Marca)\s*[:\n\-]+\s*([^\n]+)", testo_completo)
-                modello = estrai_con_regex(r"(?:Descrizione modello|Modello)\s*[:\n\-]+\s*([^\n]+)", testo_completo)
-                kw = estrai_con_regex(r"\bKW\s*[:\n\-]+\s*(\d+(?:[.,]\d+)?)", testo_completo)
-                data_immat = estrai_con_regex(r"(?:Data prima immatricolazione|Data immat\.?)\s*[:\n\-]+\s*(\d{2}/\d{2}/\d{4})", testo_completo)
-                alimentazione = estrai_con_regex(r"(?:Alimentazione)\s*[:\n\-]+\s*([A-Z0-9\s]+)", testo_completo)
+                marca = estrai_con_regex(r"(?:Codice marca|Marca)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
+                modello = estrai_con_regex(r"(?:Descrizione modello|Modello)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
+                kw = estrai_con_regex(r"\bKW\s*[:=>\n\-]+\s*(\d+(?:[.,]\d+)?)", testo_completo)
+                data_immat = estrai_con_regex(r"(?:Data prima immatricolazione|Immatricolazione)\s*[:=>\n\-]+\s*(\d{2}/\d{2}/\d{4})", testo_completo)
+                alimentazione = estrai_con_regex(r"(?:Alimentazione)\s*[:=>\n\-]+\s*([A-Z0-9\s]+)", testo_completo)
                 
-                classe_cu = estrai_con_regex(r"(?:Classe CU|CU di assegnazione)\s*[:\n\-]+\s*(\d+)", testo_completo)
-                compagnia_provenienza = estrai_con_regex(r"(?:Impresa|Compagnia di provenienza)\s*[:\n\-]+\s*([^\n]+)", testo_completo)
+                classe_cu = estrai_con_regex(r"(?:Classe CU|CU di assegnazione|CU)\s*[:=>\n\-]+\s*(\d+)", testo_completo)
+                compagnia_provenienza = estrai_con_regex(r"(?:Impresa|Compagnia di provenienza|Compagnia)\s*[:=>\n\-]+\s*([^\n]+)", testo_completo)
 
                 print(f"VALORI ESTRATTI CON DUMP -> Nome: '{nome}', CF: '{cf}', Marca: '{marca}', Modello: '{modello}', CU: '{classe_cu}', Compagnia: '{compagnia_provenienza}'", flush=True)
 
@@ -275,7 +290,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     "Data immatricolazione": data_immat.strip(),
                     "Alimentazione": alimentazione.strip(),
                     "Classe CU": classe_cu.strip(),
-                    "Compagnia Provenienza": compagnia_provenienza.strip(),
+                    "Compagnia Provenienza": provincia_o_compagnia if (provincia_o_compagnia := compagnia_provenienza.strip()) else "",
                     "Stato Bot Estrazione": "Dati Estratti"
                 }
 
@@ -301,12 +316,10 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 await context.close()
                 await browser.close()
 
-# Rotta di controllo dello stato (evita 404 nei check di Render)
 @app.get("/")
 async def root():
     return {"status": "Bot Unipol Online"}
 
-# Rotta principale flessibile
 @app.post("/estrai")
 @app.post("/estrai/")
 async def trigger_bot(data: dict, background_tasks: BackgroundTasks):
