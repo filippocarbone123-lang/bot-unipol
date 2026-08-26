@@ -23,6 +23,20 @@ def formatta_targa_spazi(targa_raw: str) -> str:
         return f"{clean[:2]} {clean[2:5]} {clean[5:]}"
     return clean
 
+async def click_elemento_dinamico(page, testo: str, max_tentativi=20) -> bool:
+    """Cerca un testo o un pulsante su TUTTI gli iframe della pagina ed esegue il clic."""
+    for _ in range(max_tentativi):
+        for frame in [page.main_frame] + page.frames:
+            try:
+                locator = frame.get_by_text(testo, exact=False).first
+                if await locator.is_visible(timeout=300):
+                    await locator.click(force=True)
+                    return True
+            except Exception:
+                continue
+        await asyncio.sleep(0.5)
+    return False
+
 async def cattura_testo_globale(page) -> str:
     """Estrae sia il testo visibile sia tutti i valori contenuti dentro i campi input/select di ogni iframe."""
     testo_aggregato = []
@@ -155,42 +169,27 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 await page.wait_for_timeout(4000)
 
-                # 2. PREVENTIVATORE UNIPOL
+                # 2. PREVENTIVATORE UNIPOL (Navigazione Multi-Frame Dinamica)
                 print("Ingresso nel Preventivatore Unipol...", flush=True)
-                
-                prodotti_clicked = False
-                for _ in range(20):
-                    for frame in [page.main_frame] + page.frames:
-                        try:
-                            btn = frame.locator('button:has-text("PRODOTTI"), .p-button:has-text("PRODOTTI"), text="PRODOTTI"').first
-                            if await btn.is_visible(timeout=500):
-                                await btn.click(force=True)
-                                prodotti_clicked = True
-                                break
-                        except Exception:
-                            continue
-                    if prodotti_clicked:
-                        break
-                    await asyncio.sleep(1)
-
+                await click_elemento_dinamico(page, "PRODOTTI")
                 await page.wait_for_timeout(1500)
 
                 print("Selezione ALTRI PRODOTTI DANNI...", flush=True)
-                await page.get_by_text("ALTRI PRODOTTI DANNI").first.click(force=True)
+                await click_elemento_dinamico(page, "ALTRI PRODOTTI DANNI")
                 await page.wait_for_timeout(800)
-                await page.locator('button:has-text("CONFERMA")').last.click(force=True)
+                await click_elemento_dinamico(page, "CONFERMA")
                 await page.wait_for_timeout(1500)
 
                 print("Selezione AUTO/NATANTI...", flush=True)
-                await page.get_by_text("AUTO/NATANTI").first.click(force=True)
+                await click_elemento_dinamico(page, "AUTO/NATANTI")
                 await page.wait_for_timeout(800)
-                await page.locator('button:has-text("CONFERMA")').last.click(force=True)
+                await click_elemento_dinamico(page, "CONFERMA")
                 await page.wait_for_timeout(1500)
 
                 print("Selezione RCA SINGOLE...", flush=True)
-                await page.get_by_text("RCA SINGOLE").first.click(force=True)
+                await click_elemento_dinamico(page, "RCA SINGOLE")
                 await page.wait_for_timeout(1000)
-                await page.locator('button:has-text("CONFERMA")').last.click(force=True)
+                await click_elemento_dinamico(page, "CONFERMA")
 
                 print("Attesa caricamento maschera Preventivo RCA...", flush=True)
                 target_frame = None
@@ -208,7 +207,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 print(f"Compilazione CIP (125) e Targa ('{targa_spazi}')...", flush=True)
                 
-                # Compilazione filtrando rigidamente solo campi di testo (evita checkbox/radio)
+                # Compilazione filtrando rigidamente solo campi di testo editabili (esclude checkbox/radio)
                 cip_input = target_frame.locator('input[type="text"][id*="cSagPrp" i], input[type="text"][name*="cSagPrp" i]').first
                 if await cip_input.count() > 0 and await cip_input.is_visible():
                     await cip_input.fill("125")
@@ -217,7 +216,6 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 if await targa_input.count() > 0 and await targa_input.is_visible():
                     await targa_input.fill(targa_spazi)
                 else:
-                    # Fallback sui campi di testo editabili visibili
                     inputs_editabili = []
                     all_text_inputs = target_frame.locator('input[type="text"]')
                     for i in range(await all_text_inputs.count()):
@@ -262,7 +260,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 else:
                     print("ATTENZIONE: Pagina risultati non rilevata in tempo, eseguo comunque il dump...", flush=True)
 
-                # Cattura e stampa a terminale del Dump Testuale
+                # Cattura e stampa del Dump Testuale
                 print("Cattura del dump testuale completo...", flush=True)
                 testo_completo = await cattura_testo_globale(page)
 
