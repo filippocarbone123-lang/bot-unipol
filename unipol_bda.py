@@ -330,6 +330,104 @@ async def _cerca_targa(page: Page, targa: str) -> None:
 # Traduzione della pagina negli oggetti del modello
 # ---------------------------------------------------------------------------
 
+def _parse_alimentazione(codice: str) -> Optional["Alimentazione"]:
+    """
+    Traduce il codice alimentazione della Motorizzazione.
+
+    Sulla pagina compare come lettera singola (G = gasolio, B = benzina), non
+    come parola: 'Alimentazione G' significa Diesel.
+    """
+    from models import Alimentazione as _Alim
+
+    c = (codice or "").strip().upper()
+    if not c:
+        return None
+    if c in ("G", "D") or "GASOLIO" in c or "DIESEL" in c:
+        return _Alim.DIESEL
+    if c == "B" or "BENZINA" in c:
+        return _Alim.BENZINA
+    if c in ("L", "GPL") or "GPL" in c:
+        return _Alim.GPL
+    if c == "M" or "METANO" in c:
+        return _Alim.METANO
+    if c == "E" or "ELETTR" in c:
+        return _Alim.ELETTRICA
+    if c == "I" or "IBRID" in c:
+        return _Alim.IBRIDA
+    return None
+
+
+# Espressioni per la pagina "dati bda" (paginaD0.do). I valori stanno in celle
+# di tabella accanto all'etichetta, quindi fra etichetta e valore possono
+# esserci spazi, tabulazioni o a capo: da qui il \s+ ovunque.
+_CAMPI_VEICOLO = {
+    "telaio": r"Telaio\s+([A-Z0-9]{8,25})",
+    "omologazione": r"Omologazione\s+([A-Z0-9]{4,20})",
+    "fabbrica": r"Fabbrica e modello\s+(.+?)(?:\s*\n|\s{2,}Nazionalit)",
+    "tipo_veicolo": r"Tipo veicolo\s+([A-Z][A-Z ]{3,40}?)(?:\s*\n|\s{2,}Categoria)",
+    "uso": r"\bUso\s+([A-Z]+)",
+    "cilindrata": r"Cilindrata\s*cc\s+([\d.]+)",
+    "cv_fiscali": r"Potenza\s*fis\.?\s*cv\s+(\d+)",
+    "kw": r"Potenza\s*max\.?\s*kw\s+([\d.,]+)",
+    "alimentazione": r"Alimentazione\s+([A-Z]{1,12})",
+    "posti": r"Num\.?\s*posti\s+(\d+)",
+    "data_immatricolazione": r"Data immatricolazione\s+(\d{1,2}[./-]\d{1,2}[./-]\d{4})",
+}
+
+
+def parse_pagina_veicolo(testo: str, veicolo: Optional[Veicolo] = None) -> Veicolo:
+    """
+    Legge i dati tecnici del veicolo dalla pagina 'dati bda'.
+
+    E' la pagina che compare subito dopo aver cercato la targa e contiene
+    telaio, omologazione, cilindrata, potenza, alimentazione e posti: gli
+    stessi dati che prima si ricavavano attraversando il preventivatore.
+    """
+    v = veicolo or Veicolo()
+    testo = (testo or "").replace("\xa0", " ")
+
+    trovato: dict[str, str] = {}
+    for nome, pattern in _CAMPI_VEICOLO.items():
+        m = re.search(pattern, testo, re.IGNORECASE)
+        if m:
+            trovato[nome] = m.group(1).strip()
+
+    v.telaio = trovato.get("telaio", v.telaio)
+    v.tipo_veicolo = trovato.get("tipo_veicolo", v.tipo_veicolo) or "AUTOVETTURA"
+    v.uso = (trovato.get("uso") or v.uso or "Privato").title()
+
+    # "FIAT AUTO SPA 199BXC1A 05" -> marca FIAT, resto come codice modello.
+    fabbrica = trovato.get("fabbrica", "")
+    if fabbrica:
+        v.allestimento = fabbrica
+        pezzi = fabbrica.split()
+        if pezzi:
+            v.marca = pezzi[0].upper()
+            if not v.modello and len(pezzi) > 1:
+                v.modello = " ".join(pezzi[1:])
+
+    if "cilindrata" in trovato:
+        v.cilindrata = _intero(trovato["cilindrata"])
+    if "cv_fiscali" in trovato:
+        v.cv_fiscali = _intero(trovato["cv_fiscali"])
+    if "posti" in trovato:
+        v.posti = _intero(trovato["posti"])
+    if "kw" in trovato:
+        kw = _decimale(trovato["kw"])
+        if kw > 0:
+            v.kw = int(kw) if float(kw).is_integer() else kw
+    if "alimentazione" in trovato:
+        alim = _parse_alimentazione(trovato["alimentazione"])
+        if alim:
+            v.alimentazione = alim
+    if "data_immatricolazione" in trovato:
+        data = _data_it(trovato["data_immatricolazione"])
+        if data:
+            v.data_immatricolazione = data
+
+    return v
+
+
 def _trova(coppie: dict[str, list[str]], *chiavi: str) -> list[str]:
     """
     Cerca un'etichetta fra quelle raccolte e restituisce i suoi valori.

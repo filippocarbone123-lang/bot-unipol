@@ -41,6 +41,7 @@ from unipol_bda import (
     USER_AGENT,
     ErroreUnipol,
     _JS_ESTRAI,
+    parse_pagina_veicolo,
     traduci_pagina_bda,
 )
 
@@ -491,24 +492,67 @@ class SessioneUnipol:
         if await self._pagina_in_errore():
             raise SessioneScaduta("Il portale ha risposto con un errore di sessione")
 
-        _log(f"targa {targa} inviata, lettura della pagina risultato")
+        # --- PAGINA 1: dati bda (paginaD0) --------------------------------
+        # Contiene i dati tecnici del veicolo: telaio, omologazione,
+        # cilindrata, potenza, alimentazione, posti, immatricolazione.
+        _log(f"targa {targa} inviata, lettura pagina dati veicolo")
+        try:
+            testo_veicolo = await page.inner_text("body", timeout=8_000)
+        except Exception:
+            testo_veicolo = ""
+        veicolo = parse_pagina_veicolo(testo_veicolo)
+        _log(f"veicolo: {veicolo.marca or '?'} | kw {veicolo.kw} | "
+             f"alim {veicolo.alimentazione} | imm {veicolo.data_immatricolazione}")
+
+        # --- PAGINA 2: attestato ANIA (paginaD1) --------------------------
+        # Si raggiunge solo con il pulsante "Visualizza Attestato" in fondo.
+        attestato_aperto = False
+        for selettore in ('input[value*="Visualizza Attestato" i]',
+                          'button:has-text("Visualizza Attestato")',
+                          'a:has-text("Visualizza Attestato")',
+                          'input[value*="Attestato" i]',
+                          'text=/Visualizza\\s+Attestato/i'):
+            try:
+                bottone = page.locator(selettore).first
+                if await bottone.count() and await bottone.is_visible(timeout=800):
+                    await bottone.click(force=True)
+                    await page.wait_for_load_state("domcontentloaded", timeout=25_000)
+                    await page.wait_for_timeout(2_000)
+                    attestato_aperto = True
+                    _log("cliccato 'Visualizza Attestato'")
+                    break
+            except Exception:
+                continue
+
+        if not attestato_aperto:
+            _log("ATTENZIONE: pulsante 'Visualizza Attestato' non trovato, "
+                 "proseguo con la pagina corrente")
+
         grezzo = await page.evaluate(_JS_ESTRAI)
         coppie = grezzo.get("coppie", {})
-        _log(f"letti {len(coppie)} campi dalla pagina")
+        _log(f"letti {len(coppie)} campi dalla pagina attestato")
 
         if not coppie:
             avvisi = " | ".join(grezzo.get("avvisi", [])) or "pagina senza campi"
             await self._torna_alla_maschera()
             raise TargaNonTrovata(f"Targa {targa}: {avvisi}")
 
-        posizione, veicolo, contraente = traduci_pagina_bda(grezzo)
+        posizione, veicolo_bda, contraente = traduci_pagina_bda(grezzo)
+
+        # I dati tecnici arrivano dalla pagina 1, targa e tipo dalla pagina 2:
+        # si tiene il valore piu' ricco fra i due.
+        veicolo.targa = veicolo_bda.targa or veicolo.targa or targa
+        if veicolo_bda.tipo_veicolo and not veicolo.tipo_veicolo:
+            veicolo.tipo_veicolo = veicolo_bda.tipo_veicolo
 
         if posizione.cu_assegnazione is None and not posizione.compagnia_provenienza:
             avvisi = " | ".join(grezzo.get("avvisi", [])) or "attestato non presente in ANIA"
+            _log(f"nessun attestato per {targa}: {avvisi}")
             await self._torna_alla_maschera()
             raise TargaNonTrovata(f"Targa {targa}: {avvisi}")
 
-        veicolo.targa = veicolo.targa or targa
+        _log(f"attestato: {posizione.compagnia_provenienza or '?'} | "
+             f"CU {posizione.cu_assegnazione} | scad {posizione.scadenza_attestato}")
 
         await self._torna_alla_maschera()
         self._ultimo_uso = datetime.now()
