@@ -152,6 +152,196 @@ async def leggi_risultato():
     return ULTIMO_RISULTATO
 
 
+# ===========================================================================
+#  ENDPOINT PER MAKE — sostituisce /estrai mantenendo lo stesso contratto
+# ===========================================================================
+#
+# Riceve lo stesso identico contenuto di /estrai:
+#     {"record_id": "recXXXX", "targa": "DL389LB", "data_nascita": "..."}
+#
+# Cambia solo il motore: banca dati ANIA invece del preventivatore. Su Make
+# basta cambiare l'indirizzo del modulo HTTP, tutto il resto resta com'e'.
+
+
+def _data_it(valore) -> str:
+    """Formato gg/mm/aaaa, quello che si aspettano le colonne di Airtable."""
+    return valore.strftime("%d/%m/%Y") if valore else ""
+
+
+def _riassunto_sinistri(storico) -> str:
+    """
+    Riga leggibile per Airtable, del tipo:
+        "2022: 1 cose | anni non coperti: 2015-2020"
+
+    Serve a chi guarda la tabella: la lista completa e' fatta di centinaia di
+    voci e in una cella non si legge.
+    """
+    pezzi = []
+    for r in storico.righe:
+        if r.categoria is not None and r.disponibile and r.numero > 0:
+            pezzi.append(f"{r.anno}: {r.numero} {r.categoria.value}")
+
+    non_coperti = sorted({r.anno for r in storico.righe
+                          if r.categoria is not None and not r.disponibile})
+    testo = " | ".join(pezzi) if pezzi else "nessun sinistro"
+    if non_coperti:
+        testo += f" | anni senza dato: {non_coperti[0]}-{non_coperti[-1]}"
+    return testo
+
+
+def _campi_airtable(dati: dict) -> dict:
+    """Traduce il risultato della banca dati nelle colonne della Trattativa."""
+    p = dati["posizione"]
+    v = dati["veicolo"]
+    c = dati["contraente"]
+
+    return {
+        "targa": v.targa,
+        # Anagrafica
+        "Codice Fiscale": c.codice_fiscale,
+        "Nome": c.nominativo,
+        "cl_datanascita": _data_it(c.data_nascita),
+        # Veicolo
+        "Marca": v.marca,
+        "Modello": v.modello,
+        "KW": v.kw,
+        "Cilindrata": v.cilindrata,
+        "Posti": v.posti,
+        "Telaio": v.telaio,
+        "Data immatricolazione": _data_it(v.data_immatricolazione),
+        "Alimentazione": v.alimentazione.value if v.alimentazione else "",
+        # Posizione assicurativa
+        "Classe CU": p.cu_assegnazione,
+        "Classe CU Provenienza": p.cu_provenienza,
+        "Compagnia Provenienza": p.compagnia_provenienza,
+        "Codice Compagnia": p.compagnia_provenienza_codice,
+        "Numero Polizza": p.numero_polizza,
+        "Scadenza Attestato": _data_it(p.scadenza_attestato),
+        "Forma Tariffaria": p.forma_tariffaria.value if p.forma_tariffaria else "",
+        "Codice IUR": p.codice_iur,
+        "Storico Sinistri": _riassunto_sinistri(p.sinistri),
+        "Stato Bot Estrazione": "Dati Estratti",
+    }
+
+
+def _scrivi_su_airtable(record_id: str, campi: dict) -> dict:
+    """
+    Scrive togliendo via via i campi che la tabella non accetta.
+
+    Il payload contiene anche colonne che potresti non avere ancora creato
+    (Telaio, Cilindrata, Codice IUR...). Invece di far fallire tutto, Airtable
+    segnala il nome del campo rifiutato e qui lo si toglie: si salva quello che
+    la tabella conosce e si annota il resto. Meglio diciotto campi su ventuno
+    che nessuno.
+    """
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Trattative/{record_id}"
+
+    payload = {k: val for k, val in campi.items() if val not in (None, "", [])}
+    scartati = []
+
+    for _ in range(25):
+        res = requests.patch(url, headers=headers,
+                             json={"fields": payload, "typecast": True}, timeout=30)
+        if res.status_code == 200:
+            return {"ok": True, "salvati": list(payload.keys()), "scartati": scartati}
+
+        if res.status_code != 422:
+            return {"ok": False, "errore": f"HTTP {res.status_code}: {res.text[:300]}",
+                    "scartati": scartati}
+
+        testo = res.text
+        campo = None
+        for pattern in (r'Unknown field name:\s*\\?"([^\\"]+)\\?"',
+                        r'Field\s*\\?"([^\\"]+)\\?"\s*cannot accept'):
+            m = re.search(pattern, testo, re.IGNORECASE)
+            if m:
+                campo = m.group(1)
+                break
+
+        if campo and campo in payload:
+            payload.pop(campo)
+            scartati.append(campo)
+            print(f"[BDA] colonna '{campo}' non presente in Airtable, la salto", flush=True)
+            continue
+
+        return {"ok": False, "errore": testo[:300], "scartati": scartati}
+
+    return {"ok": False, "errore": "troppi campi rifiutati", "scartati": scartati}
+
+
+async def _estrai_e_salva(record_id: str, targa: str):
+    """Consulta la banca dati e scrive il risultato sulla Trattativa."""
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Trattative/{record_id}"
+
+    print(f"[BDA] === Make ha chiesto {targa} (record {record_id}) ===", flush=True)
+    try:
+        requests.patch(url, headers=headers,
+                       json={"fields": {"Stato Bot Estrazione": "In Corso"}}, timeout=30)
+    except Exception as e:
+        print(f"[BDA] non riesco a segnare 'In Corso': {e}", flush=True)
+
+    try:
+        async with bot_semaphore:
+            dati = await POOL.consulta(targa)
+
+        esito = _scrivi_su_airtable(record_id, _campi_airtable(dati))
+
+        if esito["ok"]:
+            print(f"[BDA] === {targa} salvata su Airtable in "
+                  f"{dati['durata_sec']:.1f}s "
+                  f"({len(esito['salvati'])} campi) ===", flush=True)
+            if esito["scartati"]:
+                print(f"[BDA] colonne mancanti in tabella: "
+                      f"{', '.join(esito['scartati'])}", flush=True)
+        else:
+            print(f"[BDA] === salvataggio fallito: {esito['errore']} ===", flush=True)
+            requests.patch(url, headers=headers, json={"fields": {
+                "Stato Bot Estrazione": "Errore",
+                "Note e Errori Bot": f"Airtable: {esito['errore']}"[:1000],
+            }}, timeout=30)
+
+    except Exception as e:
+        import traceback
+        print(f"[BDA] === ERRORE su {targa} ===\n{traceback.format_exc()}", flush=True)
+        try:
+            requests.patch(url, headers=headers, json={"fields": {
+                "Stato Bot Estrazione": "Errore",
+                "Note e Errori Bot": f"{type(e).__name__}: {str(e)[:800]}",
+            }}, timeout=30)
+        except Exception:
+            pass
+
+
+@app.post("/estrai-bda")
+@app.post("/estrai-bda/")
+async def estrai_bda(data: dict, background_tasks: BackgroundTasks):
+    """
+    Indirizzo da usare in Make al posto di /estrai.
+
+    Stesso contenuto in ingresso, motore piu' veloce, e i risultati finiscono
+    direttamente sulla Trattativa.
+    """
+    record_id = data.get("record_id")
+    targa = data.get("targa")
+
+    if not record_id or not targa:
+        raise HTTPException(400, "Servono 'record_id' e 'targa'")
+    if not MOTORE_BDA_ATTIVO:
+        raise HTTPException(503, f"Motore BDA non disponibile: {ERRORE_BDA}")
+
+    background_tasks.add_task(_estrai_e_salva, record_id, targa)
+    return {"status": "Estrazione Avviata", "record_id": record_id,
+            "targa": str(targa).upper(), "motore": "banca dati ANIA"}
+
+
 @app.post("/bda/lotto")
 async def consulta_lotto(payload: dict):
     """
