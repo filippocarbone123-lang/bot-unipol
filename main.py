@@ -1,13 +1,43 @@
+"""
+main.py — Bot Unipol di Protexa, versione 2.0
+
+QUESTO FILE SOSTITUISCE IL PRECEDENTE E NON TOGLIE NULLA.
+
+Contiene due motori che convivono:
+
+  MOTORE 1 (quello che gia' usi, invariato)
+      POST /estrai
+      Attraversa il preventivatore RCA e scrive su Airtable.
+      Il codice e' identico a prima, riga per riga. Chi lo chiama gia' oggi
+      continua a funzionare senza modifiche.
+
+  MOTORE 2 (nuovo)
+      GET  /bda/{targa}
+      POST /bda/lotto
+      Interroga la Banca Dati ANIA per targa. Non tocca il preventivatore.
+      E' piu' veloce e tiene la sessione aperta fra una targa e l'altra.
+
+I due motori non si disturbano: condividono lo stesso semaforo, quindi non
+aprono mai due browser insieme. Su Render piano free e' obbligatorio,
+altrimenti il container esaurisce la memoria.
+
+Se i file nuovi non fossero ancora stati caricati, il motore 2 resta spento e
+il motore 1 continua a lavorare: il servizio non va mai giu' per quel motivo.
+"""
+
+import asyncio
 import os
 import re
+from datetime import datetime
+
 import pyotp
 import requests
-import asyncio
-from datetime import datetime
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from playwright.async_api import async_playwright
 
-app = FastAPI()
+app = FastAPI(title="Bot Unipol Protexa", version="2.0")
+
+# Un solo browser alla volta su tutta l'applicazione.
 bot_semaphore = asyncio.Semaphore(1)
 
 UNIPOL_USER = os.getenv("UNIPOL_USER")
@@ -18,11 +48,141 @@ UNIPOL_TOTP_SECRET = RAW_SECRET.replace(" ", "").strip().upper()
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 
+
+# ===========================================================================
+#  MOTORE 2 — BANCA DATI ANIA  (nuovo)
+# ===========================================================================
+#
+# Gli import stanno dentro un try apposta: se uno dei file nuovi mancasse,
+# il servizio parte lo stesso e il motore 1 resta in funzione.
+
+MOTORE_BDA_ATTIVO = False
+ERRORE_BDA = ""
+
+try:
+    from unipol_sessione import POOL, ErroreUnipol, TargaNonTrovata
+    MOTORE_BDA_ATTIVO = True
+except Exception as _e:
+    ERRORE_BDA = f"{type(_e).__name__}: {_e}"
+
+
+@app.get("/bda/{targa}")
+async def consulta_banca_dati(targa: str):
+    """
+    Legge i dati assicurativi di una targa dalla Banca Dati ANIA.
+
+    Esempio da aprire nel browser:
+        https://bot-unipol.onrender.com/bda/DL389LB
+
+    Risponde con compagnia di provenienza, classe CU, scadenza attestato,
+    numero polizza e storico sinistri.
+    """
+    if not MOTORE_BDA_ATTIVO:
+        raise HTTPException(503, f"Motore BDA non disponibile. Dettaglio: {ERRORE_BDA}")
+
+    async with bot_semaphore:
+        try:
+            dati = await POOL.consulta(targa)
+        except TargaNonTrovata as e:
+            raise HTTPException(404, str(e))
+        except ErroreUnipol as e:
+            raise HTTPException(502, str(e))
+        except Exception as e:
+            raise HTTPException(500, f"Errore imprevisto: {str(e)[:300]}")
+
+    return {
+        "targa": dati["targa"],
+        "durata_sec": round(dati["durata_sec"], 1),
+        "posizione": dati["posizione"].model_dump(mode="json"),
+        "veicolo": dati["veicolo"].model_dump(mode="json"),
+        "contraente": dati["contraente"].model_dump(mode="json"),
+    }
+
+
+@app.post("/bda/lotto")
+async def consulta_lotto(payload: dict):
+    """
+    Consulta piu' targhe in una volta sola, riusando la stessa sessione.
+
+    Corpo della richiesta:  {"targhe": ["DL389LB", "ES211SV", "EK806RY"]}
+
+    Le targhe in errore non fermano il lotto: finiscono nel risultato con il
+    motivo, e le altre proseguono.
+    """
+    if not MOTORE_BDA_ATTIVO:
+        raise HTTPException(503, f"Motore BDA non disponibile. Dettaglio: {ERRORE_BDA}")
+
+    targhe = payload.get("targhe") or []
+    if not isinstance(targhe, list) or not targhe:
+        raise HTTPException(400, 'Attesa una lista, esempio: {"targhe": ["DL389LB"]}')
+    if len(targhe) > 50:
+        raise HTTPException(400, "Massimo 50 targhe per lotto")
+
+    inizio = datetime.now()
+    async with bot_semaphore:
+        risultati = await POOL.consulta_molte(targhe)
+
+    riuscite, fallite = [], []
+    for r in risultati:
+        if r["ok"]:
+            riuscite.append({
+                "targa": r["targa"],
+                "posizione": r["dati"]["posizione"].model_dump(mode="json"),
+                "contraente": r["dati"]["contraente"].model_dump(mode="json"),
+            })
+        else:
+            fallite.append({"targa": r["targa"], "motivo": r["errore"]})
+
+    totale = (datetime.now() - inizio).total_seconds()
+    return {
+        "richieste": len(targhe),
+        "riuscite": len(riuscite),
+        "fallite": len(fallite),
+        "secondi_totali": round(totale, 1),
+        "secondi_per_targa": round(totale / max(len(targhe), 1), 1),
+        "dati": riuscite,
+        "errori": fallite,
+    }
+
+
+@app.get("/stato")
+async def stato():
+    """Pagina di controllo: dice cosa e' acceso e cosa no."""
+    info = {
+        "motore_preventivatore": "attivo",
+        "motore_banca_dati": "attivo" if MOTORE_BDA_ATTIVO else f"spento ({ERRORE_BDA})",
+        "credenziali_unipol": "presenti" if (UNIPOL_USER and UNIPOL_PASS and UNIPOL_TOTP_SECRET) else "MANCANTI",
+        "credenziali_airtable": "presenti" if (AIRTABLE_API_KEY and AIRTABLE_BASE_ID) else "MANCANTI",
+        "sessioni_configurate": os.getenv("UNIPOL_SESSIONI", "1"),
+    }
+    if MOTORE_BDA_ATTIVO:
+        try:
+            info["sessioni"] = POOL.statistiche()
+        except Exception:
+            pass
+    return info
+
+
+@app.on_event("shutdown")
+async def chiudi_sessioni():
+    """Chiude i browser quando Render spegne il servizio."""
+    if MOTORE_BDA_ATTIVO:
+        try:
+            await POOL.chiudi()
+        except Exception:
+            pass
+
+
+# ===========================================================================
+#  MOTORE 1 — PREVENTIVATORE RCA  (invariato rispetto alla versione attuale)
+# ===========================================================================
+
 def formatta_targa_spazi(targa_raw: str) -> str:
     clean = targa_raw.replace(" ", "").upper()
     if len(clean) == 7:
         return f"{clean[:2]} {clean[2:5]} {clean[5:]}"
     return clean
+
 
 async def click_elemento_dinamico(page, testo: str, max_tentativi=15) -> bool:
     for _ in range(max_tentativi):
@@ -37,13 +197,14 @@ async def click_elemento_dinamico(page, testo: str, max_tentativi=15) -> bool:
         await asyncio.sleep(0.5)
     return False
 
+
 async def invia_form_prosegui(page, target_frame) -> bool:
     selectors = [
         'input[value*="Prosegui" i]',
         'button:has-text("Prosegui")',
         'a:has-text("Prosegui")',
         '[id*="prosegui" i]',
-        'text=/Prosegui/i'
+        'text=/Prosegui/i',
     ]
     for sel in selectors:
         try:
@@ -65,8 +226,8 @@ async def invia_form_prosegui(page, target_frame) -> bool:
                 continue
     return False
 
+
 async def clicca_subtab(page, result_frame, nomi_tab: list) -> bool:
-    """Clicca direttamente la sotto-scheda cercando tra i possibili titoli."""
     frames = [result_frame] + [f for f in page.frames if f != result_frame]
     for frame in frames:
         if not frame:
@@ -77,7 +238,7 @@ async def clicca_subtab(page, result_frame, nomi_tab: list) -> bool:
                 f'button:has-text("{nome}")',
                 f'span:has-text("{nome}")',
                 f'td:has-text("{nome}")',
-                f'text="{nome}"'
+                f'text="{nome}"',
             ]:
                 try:
                     el = frame.locator(selector).first
@@ -88,34 +249,33 @@ async def clicca_subtab(page, result_frame, nomi_tab: list) -> bool:
                     continue
     return False
 
+
 async def estrai_tutti_i_campi_dalla_pagina(page) -> dict:
-    """Estrae i dati da qualsiasi elemento (inclusi readonly, disabled, select e span) rispettando la struttura DOM."""
     mappa = {}
     for frame in page.frames:
         try:
             dati = await frame.evaluate('''() => {
                 let res = {};
-                
+
                 const pulisci = (s) => (s || '').trim().replace(/[:*]/g, '');
 
                 const registra = (lbl, val) => {
                     let label = pulisci(lbl);
                     let valore = pulisci(val);
                     if (!label || label.length < 2 || label.length > 60 || /^\\d+$/.test(label)) return;
-                    
+
                     let valLow = valore.toLowerCase();
-                    if (valore && 
-                        !valLow.includes('seleziona') && 
-                        !valLow.includes('cerca') && 
-                        valore !== 'ui-button' && 
-                        valore !== '125' && 
+                    if (valore &&
+                        !valLow.includes('seleziona') &&
+                        !valLow.includes('cerca') &&
+                        valore !== 'ui-button' &&
+                        valore !== '125' &&
                         !valore.includes('javax.faces') &&
                         !valore.includes('\\n')) {
                         res[label] = valore;
                     }
                 };
 
-                // 1. Scan Input, Select e Textarea
                 const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
                 inputs.forEach(i => {
                     let val = '';
@@ -124,7 +284,7 @@ async def estrai_tutti_i_campi_dalla_pagina(page) -> dict:
                     } else {
                         val = i.value || i.getAttribute('value') || '';
                     }
-                    
+
                     let labelText = '';
                     if (i.id) {
                         let l = document.querySelector(`label[for="${i.id}"]`);
@@ -138,7 +298,6 @@ async def estrai_tutti_i_campi_dalla_pagina(page) -> dict:
                     registra(labelText, val);
                 });
 
-                // 2. Scan PrimeFaces Dropdown
                 const pfLabels = Array.from(document.querySelectorAll('.ui-selectonemenu-label, .ui-selectonemenu-title'));
                 pfLabels.forEach(pf => {
                     let txt = pf.innerText || pf.textContent || '';
@@ -147,7 +306,6 @@ async def estrai_tutti_i_campi_dalla_pagina(page) -> dict:
                     if (prev) registra(prev.innerText || prev.textContent, txt);
                 });
 
-                // 3. Scan celle TD/TH adiacenti
                 const rows = Array.from(document.querySelectorAll('tr, .ui-panelgrid-cell, .ui-g'));
                 rows.forEach(r => {
                     const children = Array.from(r.children);
@@ -158,8 +316,8 @@ async def estrai_tutti_i_campi_dalla_pagina(page) -> dict:
                             let val = '';
                             let inp = valCell.querySelector('input, select, textarea');
                             if (inp) {
-                                val = inp.tagName.toLowerCase() === 'select' ? 
-                                    (inp.options[inp.selectedIndex] ? inp.options[inp.selectedIndex].text : '') : 
+                                val = inp.tagName.toLowerCase() === 'select' ?
+                                    (inp.options[inp.selectedIndex] ? inp.options[inp.selectedIndex].text : '') :
                                     (inp.value || inp.getAttribute('value') || '');
                             } else {
                                 val = valCell.innerText || valCell.textContent || '';
@@ -177,21 +335,21 @@ async def estrai_tutti_i_campi_dalla_pagina(page) -> dict:
             continue
     return mappa
 
+
 def cerca_in_mappa(mappa: dict, keywords: list) -> str:
-    scarti = ["proprietario", "contraente", "usufruttuario", "conducente", "aggiungi una figura", "0", "cerca", "m20", "m30", "m40", "na", "--"]
+    scarti = ["proprietario", "contraente", "usufruttuario", "conducente",
+              "aggiungi una figura", "0", "cerca", "m20", "m30", "m40", "na", "--"]
     for k_map, v_map in mappa.items():
         k_clean = k_map.strip().lower()
         v_clean = v_map.strip()
-        
+
         if not v_clean or v_clean.lower() in scarti or "\n" in v_clean:
             continue
 
         for kw in keywords:
             kw_clean = kw.strip().lower()
-            # Uso dei confini di parola (\b) per evitare che "CU" combaci con "di CUi"
             pattern = r'\b' + re.escape(kw_clean) + r'\b'
             if re.search(pattern, k_clean):
-                # Sanificazione specifica per la Classe CU (es. "c013" -> "13")
                 if kw_clean in ["classe cu", "cu", "classe cu assegnata", "classe cu di assegnazione"]:
                     m_num = re.search(r'\b(\d{1,2})\b', v_clean)
                     if m_num:
@@ -199,32 +357,33 @@ def cerca_in_mappa(mappa: dict, keywords: list) -> str:
                 return v_clean
     return ""
 
+
 def pulisci_valore(valore: str) -> str:
     if not valore:
         return ""
     v = valore.strip()
-    scarti = ["cerca", "seleziona", "ui-button", "codice marca", "descrizione modello", "impresa", "compagnia", "proprietario", "contraente", "0", "m20", "m30", "m40", "na", "--"]
+    scarti = ["cerca", "seleziona", "ui-button", "codice marca", "descrizione modello",
+              "impresa", "compagnia", "proprietario", "contraente", "0",
+              "m20", "m30", "m40", "na", "--"]
     if v.lower() in scarti or "\n" in v or len(v) > 120:
         return ""
     return v
+
 
 async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: str):
     async with bot_semaphore:
         headers = {
             "Authorization": f"Bearer {AIRTABLE_API_KEY}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
         url_trattativa = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Trattative/{record_id}"
 
         targa_spazi = formatta_targa_spazi(targa)
         targa_pulita = targa.replace(" ", "").upper()
 
-        print(f"[{record_id}] Avvio estrazione corretta per targa: {targa_pulita} (Formattata: {targa_spazi})", flush=True)
-        requests.patch(
-            url_trattativa,
-            headers=headers,
-            json={"fields": {"Stato Bot Estrazione": "In Corso"}}
-        )
+        print(f"[{record_id}] Avvio estrazione per targa: {targa_pulita} ({targa_spazi})", flush=True)
+        requests.patch(url_trattativa, headers=headers,
+                       json={"fields": {"Stato Bot Estrazione": "In Corso"}})
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -237,20 +396,19 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     "--no-zygote",
                     "--js-flags=--max-old-space-size=256",
                     "--disable-accelerated-2d-canvas",
-                    "--disable-background-networking"
-                ]
+                    "--disable-background-networking",
+                ],
             )
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             )
-
             page = await context.new_page()
 
             try:
-                # 1. LOGIN & MFA
                 print("1/4 Inserimento Username e Password...", flush=True)
                 await page.goto("https://essig.unipolsai.it/my-policy", wait_until="commit", timeout=40000)
-                
+
                 user_input = page.locator('input[name="Username" i], input[name="username" i]').first
                 await user_input.wait_for(state="visible", timeout=20000)
                 await user_input.fill(UNIPOL_USER or "")
@@ -278,19 +436,18 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
                 codice_otp = totp.now()
-                
+
                 await code_input.fill("")
                 await code_input.type(codice_otp, delay=100)
-                
+
                 print("Clic su pulsante Login OTP...", flush=True)
                 await page.locator('input[type="submit"], button').first.click()
-                
+
                 print("Attesa 6s per registrazione sessione di sicurezza...", flush=True)
                 await asyncio.sleep(6)
 
                 print("Forzatura URL Leonardo...", flush=True)
                 leonardo_url = "https://essig.unipolsai.it/WorkspaceWeb/app/configuratore_questionari/questionario"
-                
                 try:
                     await page.goto(leonardo_url, wait_until="commit", timeout=20000)
                 except Exception as e:
@@ -298,7 +455,6 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
 
                 await page.wait_for_timeout(4000)
 
-                # 2. PREVENTIVATORE UNIPOL
                 print("Ingresso nel Preventivatore Unipol...", flush=True)
                 await click_elemento_dinamico(page, "PRODOTTI")
                 await page.wait_for_timeout(1500)
@@ -335,9 +491,8 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     target_frame = page.main_frame
 
                 print(f"Compilazione CIP (125) e Targa ('{targa_spazi}')...", flush=True)
-                
                 data_oggi = datetime.now().strftime("%d/%m/%Y")
-                
+
                 await target_frame.evaluate('''
                     ({cipVal, targaVal, dataVal}) => {
                         const dateInput = document.querySelector('input[id*="eftPol"], input[name*="eftPol"]');
@@ -381,7 +536,6 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 print("Invio form maschera con clic su Prosegui...", flush=True)
                 await invia_form_prosegui(page, target_frame)
 
-                # 3. ATTESA RISULTATI E SCANSIONE SUB-TAB
                 print("Attesa calcolo ed elaborazione del Preventivo (fino a 40s)...", flush=True)
                 result_frame = None
                 for _ in range(40):
@@ -402,7 +556,6 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 mappa_totale = {}
                 print("RISULTATI PREVENTIVO RILEVATI! Clic e lettura delle 3 schede...", flush=True)
 
-                # --- SCHEDA 1: DATI ASSICURATIVI -> Veicolo/natante ---
                 print("1/3 Clic su 'DATI ASSICURATIVI' / 'Veicolo/natante'...", flush=True)
                 await clicca_subtab(page, result_frame, ["DATI ASSICURATIVI"])
                 await page.wait_for_timeout(1000)
@@ -412,7 +565,6 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 print(f" -> Scheda Veicolo: {len(d1)} campi estratti", flush=True)
                 mappa_totale.update(d1)
 
-                # --- SCHEDA 2: Figure contrattuali ---
                 print("2/3 Clic su 'Figure contrattuali'...", flush=True)
                 await clicca_subtab(page, result_frame, ["Figure contrattuali"])
                 await page.wait_for_timeout(2500)
@@ -420,7 +572,6 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 print(f" -> Scheda Figure Contrattuali: {len(d2)} campi estratti", flush=True)
                 mappa_totale.update(d2)
 
-                # --- SCHEDA 3: Posizione assicurativa ---
                 print("3/3 Clic su 'Posizione assicurativa'...", flush=True)
                 await clicca_subtab(page, result_frame, ["Posizione assicurativa"])
                 await page.wait_for_timeout(2500)
@@ -433,21 +584,19 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     print(f"  [{k}] => {v}", flush=True)
                 print("=============================================================\n", flush=True)
 
-                # Estrattore mirato
                 cf = cerca_in_mappa(mappa_totale, ["Cod.Fisc/P.IVA", "Cod.Fisc", "C.F.", "Codice Fiscale"])
                 nome = cerca_in_mappa(mappa_totale, ["Nominativo", "Cliente"])
                 data_nas = cerca_in_mappa(mappa_totale, ["Data di nascita", "Nato il"])
                 residenza = cerca_in_mappa(mappa_totale, ["Indirizzo", "Residenza"])
                 prov = cerca_in_mappa(mappa_totale, ["Prov", "Provincia"])
                 cap = cerca_in_mappa(mappa_totale, ["CAP"])
-                
+
                 marca = cerca_in_mappa(mappa_totale, ["Codice marca", "Marca"])
                 modello = cerca_in_mappa(mappa_totale, ["Descrizione modello", "Modello"])
                 kw_raw = cerca_in_mappa(mappa_totale, ["KW"])
                 data_immat = cerca_in_mappa(mappa_totale, ["Data prima immatricolazione", "Immatricolazione"])
                 alimentazione_raw = cerca_in_mappa(mappa_totale, ["Alimentazione"])
 
-                # Conversione numerica KW
                 kw = None
                 if kw_raw:
                     clean_kw = re.sub(r'[^\d.,]', '', kw_raw).replace(',', '.')
@@ -459,7 +608,6 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                         except ValueError:
                             kw = None
 
-                # Single-Select Alimentazione
                 alimentazione = ""
                 if "BENZINA" in alimentazione_raw.upper():
                     alimentazione = "Benzina"
@@ -481,11 +629,11 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 modello_clean = pulisci_valore(modello)
                 compagnia_clean = pulisci_valore(compagnia_provenienza)
 
-                print(f"VALORI REALI ESTRATTI -> Nome: '{nome_clean}', CF: '{cf_clean}', Marca: '{marca_clean}', Modello: '{modello_clean}', KW: {kw}, CU: '{classe_cu}', Compagnia: '{compagnia_clean}'", flush=True)
+                print(f"VALORI ESTRATTI -> Nome: '{nome_clean}', CF: '{cf_clean}', "
+                      f"Marca: '{marca_clean}', Modello: '{modello_clean}', KW: {kw}, "
+                      f"CU: '{classe_cu}', Compagnia: '{compagnia_clean}'", flush=True)
 
-                # 4. SALVATAGGIO SU AIRTABLE CON SANIFICAZIONE AUTOMATICA
                 print("Mappatura e Salvataggio dei dati su Airtable...", flush=True)
-                
                 raw_fields = {
                     "Codice Fiscale": cf_clean,
                     "cl_datanascita": data_nas,
@@ -499,7 +647,7 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                     "Alimentazione": alimentazione,
                     "Classe CU": classe_cu,
                     "Compagnia Provenienza": compagnia_clean,
-                    "Stato Bot Estrazione": "Dati Estratti"
+                    "Stato Bot Estrazione": "Dati Estratti",
                 }
 
                 if nome_clean:
@@ -510,15 +658,15 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
                 for _ in range(5):
                     res = requests.patch(url_trattativa, headers=headers, json={"fields": cleaned_fields})
                     if res.status_code == 200:
-                        print(f"[{record_id}] ESTRAZIONE E MAPPATURA COMPLETATE CON SUCCESSO!", flush=True)
+                        print(f"[{record_id}] ESTRAZIONE E MAPPATURA COMPLETATE!", flush=True)
                         break
                     elif res.status_code == 422:
                         err_text = res.text
-                        print(f"Rilevato errore campo Airtable 422 ({err_text}), sanificazione...", flush=True)
-                        
+                        print(f"Errore campo Airtable 422 ({err_text}), sanificazione...", flush=True)
+
                         unk_match = re.search(r'Unknown field name:\s*\\?"([^\\"]+)\\?"', err_text)
                         val_match = re.search(r'Field\s*\\?"([^\\"]+)\\?"\s*cannot accept', err_text, re.IGNORECASE)
-                        
+
                         if unk_match:
                             bad_field = unk_match.group(1)
                             print(f"Rimuovo campo non riconosciuto '{bad_field}'...", flush=True)
@@ -538,19 +686,23 @@ async def estrai_dati_preventivatore(record_id: str, targa: str, data_nascita: s
             except Exception as e:
                 err_msg = str(e)[:250]
                 print(f"[{record_id}] ERRORE: {err_msg}", flush=True)
-                requests.patch(
-                    url_trattativa,
-                    headers=headers,
-                    json={"fields": {"Stato Bot Estrazione": "Errore"}}
-                )
+                requests.patch(url_trattativa, headers=headers,
+                               json={"fields": {"Stato Bot Estrazione": "Errore"}})
 
             finally:
                 await context.close()
                 await browser.close()
 
+
 @app.get("/")
 async def root():
-    return {"status": "Bot Unipol Online"}
+    return {
+        "status": "Bot Unipol Online",
+        "versione": "2.0",
+        "motore_banca_dati": "attivo" if MOTORE_BDA_ATTIVO else "spento",
+        "endpoint": ["/estrai", "/bda/{targa}", "/bda/lotto", "/stato"],
+    }
+
 
 @app.post("/estrai")
 @app.post("/estrai/")
@@ -558,6 +710,6 @@ async def trigger_bot(data: dict, background_tasks: BackgroundTasks):
     record_id = data.get("record_id")
     targa = data.get("targa")
     data_nascita = data.get("data_nascita")
-    
+
     background_tasks.add_task(estrai_dati_preventivatore, record_id, targa, data_nascita)
     return {"status": "Estrazione Avviata", "record_id": record_id}
