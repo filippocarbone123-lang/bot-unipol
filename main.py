@@ -197,45 +197,197 @@ def _riassunto_sinistri(storico) -> str:
     return testo
 
 
-def _campi_airtable(dati: dict) -> dict:
-    """Traduce il risultato della banca dati nelle colonne della Trattativa."""
-    p = dati["posizione"]
-    v = dati["veicolo"]
-    c = dati["contraente"]
+# ===========================================================================
+#  RICONOSCIMENTO AUTOMATICO DELLE COLONNE DI AIRTABLE
+# ===========================================================================
+#
+# I nomi delle colonne non sono scritti nel codice. Il bot legge un campione
+# di record dalla tabella Trattative e ricava da li' come si chiamano davvero.
+#
+# Il motivo e' concreto: la tabella usa il prefisso "cli_" (cli_citta,
+# cli_datanascita), non "cl_". Una lettera di differenza e Airtable rifiuta la
+# scrittura. Invece di ricopiare i nomi a mano e sbagliarli, li si chiede alla
+# tabella stessa. Se domani rinomini o aggiungi una colonna, il bot si adatta.
 
+# Per ogni dato, i nomi con cui potrebbe comparire nella tabella.
+# Il primo della lista e' quello usato se il riconoscimento non trova nulla.
+ALIAS_COLONNE: dict[str, list[str]] = {
+    "targa":                 ["targa", "Targa"],
+    "codice_fiscale":        ["Codice Fiscale", "cf trattative", "codice fiscale"],
+    "nominativo":            ["cliente", "Nome", "Nominativo"],
+    "data_nascita":          ["cli_datanascita", "cl_datanascita", "Data di nascita"],
+    "indirizzo":             ["cli_indirizzo", "cl_indirizzo", "Indirizzo"],
+    "civico":                ["cli_civico", "cl_civico", "Civico"],
+    "cap":                   ["cli_cap", "cl_cap", "CAP"],
+    "citta":                 ["cli_citta", "cl_citta", "Citta", "Città"],
+    "provincia":             ["cli_provincia", "cl_provincia", "Provincia"],
+    "cellulare":             ["cli_cel", "cli_cell", "cellulare", "cl_cell"],
+    "marca":                 ["Marca"],
+    "modello":               ["Modello"],
+    "kw":                    ["KW"],
+    "cilindrata":            ["Cilindrata"],
+    "posti":                 ["Posti"],
+    "telaio":                ["Telaio"],
+    "data_immatricolazione": ["Data immatricolazione", "Data Immatricolazione"],
+    "alimentazione":         ["Alimentazione"],
+    "classe_cu":             ["Classe CU", "Classe CU assegnata"],
+    "classe_cu_provenienza": ["Classe CU Provenienza", "Classe CU di provenienza"],
+    "compagnia":             ["Compagnia Provenienza", "Compagnia di provenienza", "Compagnia"],
+    "codice_compagnia":      ["Codice Compagnia"],
+    "numero_polizza":        ["Numero Polizza"],
+    "scadenza_attestato":    ["Scadenza Attestato", "Data scadenza attestato"],
+    "forma_tariffaria":      ["Forma Tariffaria"],
+    "codice_iur":            ["Codice IUR"],
+    "storico_sinistri":      ["Storico Sinistri ATRC", "Storico Sinistri"],
+    "stato_bot":             ["Stato Bot Estrazione", "stato"],
+    "note_bot":              ["Note e Errori Bot", "Note Bot"],
+}
+
+_COLONNE_TROVATE: dict[str, str] = {}
+_COLONNE_REALI: list[str] = []
+
+
+def _chiave(nome: str) -> str:
+    """Confronto tollerante: ignora maiuscole, spazi, underscore e punti."""
+    return re.sub(r"[^a-z0-9]", "", (nome or "").lower())
+
+
+def _colonne_della_tabella() -> list[str]:
+    """
+    Chiede ad Airtable un campione di record e raccoglie i nomi di colonna.
+
+    Airtable restituisce solo i campi valorizzati in ciascun record, per cui
+    si guardano cento record e si uniscono i nomi: una colonna sempre vuota
+    resta invisibile, ma per quelle il ripiego sul primo alias e la
+    sanificazione degli errori 422 fanno comunque il loro lavoro.
+    """
+    global _COLONNE_REALI
+    if _COLONNE_REALI:
+        return _COLONNE_REALI
+
+    try:
+        res = requests.get(
+            f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Trattative",
+            headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}"},
+            params={"maxRecords": 100},
+            timeout=30,
+        )
+        if res.status_code != 200:
+            print(f"[BDA] non riesco a leggere le colonne: HTTP {res.status_code}", flush=True)
+            return []
+        nomi: set[str] = set()
+        for record in res.json().get("records", []):
+            nomi.update(record.get("fields", {}).keys())
+        _COLONNE_REALI = sorted(nomi)
+        print(f"[BDA] riconosciute {len(_COLONNE_REALI)} colonne nella tabella Trattative",
+              flush=True)
+    except Exception as e:
+        print(f"[BDA] riconoscimento colonne non riuscito: {e}", flush=True)
+        return []
+
+    return _COLONNE_REALI
+
+
+def _mappa_colonne() -> dict[str, str]:
+    """Associa a ogni dato il nome della colonna che esiste davvero."""
+    global _COLONNE_TROVATE
+    if _COLONNE_TROVATE:
+        return _COLONNE_TROVATE
+
+    reali = _colonne_della_tabella()
+    per_chiave = {_chiave(n): n for n in reali}
+
+    mappa: dict[str, str] = {}
+    for dato, alias in ALIAS_COLONNE.items():
+        for candidato in alias:
+            trovata = per_chiave.get(_chiave(candidato))
+            if trovata:
+                mappa[dato] = trovata
+                break
+        else:
+            # Nessun riscontro: si tenta comunque il nome principale. Se la
+            # colonna non c'e', la sanificazione 422 la togliera'.
+            mappa[dato] = alias[0]
+
+    _COLONNE_TROVATE = mappa
+    return mappa
+
+
+def _colonna_calcolata(nome: str) -> bool:
+    """
+    Le colonne di tipo Lookup o Formula non sono scrivibili.
+
+    Nella tabella ce n'e' almeno una, 'cf (from Codice Fiscale)': scrivendoci
+    Airtable risponde che il campo e' calcolato. Si riconoscono dal '(from '
+    nel nome, che e' la forma con cui Airtable nomina i lookup.
+    """
+    return "(from " in (nome or "").lower()
+
+
+@app.get("/airtable/colonne")
+async def elenco_colonne():
+    """
+    Mostra quali colonne il bot ha riconosciuto e dove scrivera' ogni dato.
+
+    Utile dopo aver aggiunto o rinominato una colonna:
+        https://bot-unipol.onrender.com/airtable/colonne
+    """
+    mappa = _mappa_colonne()
+    reali = set(_colonne_della_tabella())
     return {
-        "targa": v.targa,
-        # Anagrafica.
-        # Alcune colonne compaiono con nomi diversi a seconda della tabella:
-        # si mandano entrambe le versioni e Airtable scarta quella che non
-        # conosce, invece di perdere il dato perche' il nome non combacia.
-        "Codice Fiscale": c.codice_fiscale,
-        "cf trattative": c.codice_fiscale,
-        "Nome": c.nominativo,
-        "cliente": c.nominativo,
-        "cl_datanascita": _data_it(c.data_nascita),
-        "Data di nascita": _data_it(c.data_nascita),
-        # Veicolo
-        "Marca": v.marca,
-        "Modello": v.modello,
-        "KW": v.kw,
-        "Cilindrata": v.cilindrata,
-        "Posti": v.posti,
-        "Telaio": v.telaio,
-        "Data immatricolazione": _data_it(v.data_immatricolazione),
-        "Alimentazione": v.alimentazione.value if v.alimentazione else "",
-        # Posizione assicurativa
-        "Classe CU": p.cu_assegnazione,
-        "Classe CU Provenienza": p.cu_provenienza,
-        "Compagnia Provenienza": p.compagnia_provenienza,
-        "Codice Compagnia": p.compagnia_provenienza_codice,
-        "Numero Polizza": p.numero_polizza,
-        "Scadenza Attestato": _data_it(p.scadenza_attestato),
-        "Forma Tariffaria": p.forma_tariffaria.value if p.forma_tariffaria else "",
-        "Codice IUR": p.codice_iur,
-        "Storico Sinistri": _riassunto_sinistri(p.sinistri),
-        "Stato Bot Estrazione": "Dati Estratti",
+        "colonne_trovate_in_tabella": sorted(reali),
+        "dove_scrive_ogni_dato": mappa,
+        "dati_senza_colonna": sorted(
+            dato for dato, colonna in mappa.items() if colonna not in reali
+        ),
     }
+
+
+@app.post("/airtable/ricarica-colonne")
+async def ricarica_colonne():
+    """Da usare dopo aver creato colonne nuove, per farle riconoscere subito."""
+    global _COLONNE_TROVATE, _COLONNE_REALI
+    _COLONNE_TROVATE, _COLONNE_REALI = {}, []
+    return {"stato": "riconoscimento azzerato", "colonne": len(_colonne_della_tabella())}
+
+
+def _campi_airtable(dati: dict) -> dict:
+    """Traduce il risultato della banca dati nelle colonne reali della tabella."""
+    p, v, c = dati["posizione"], dati["veicolo"], dati["contraente"]
+    col = _mappa_colonne()
+
+    valori = {
+        "targa":                 v.targa,
+        "codice_fiscale":        c.codice_fiscale,
+        "nominativo":            c.nominativo,
+        "data_nascita":          _data_it(c.data_nascita),
+        "marca":                 v.marca,
+        "modello":               v.modello,
+        "kw":                    v.kw,
+        "cilindrata":            v.cilindrata,
+        "posti":                 v.posti,
+        "telaio":                v.telaio,
+        "data_immatricolazione": _data_it(v.data_immatricolazione),
+        "alimentazione":         v.alimentazione.value if v.alimentazione else "",
+        "classe_cu":             p.cu_assegnazione,
+        "classe_cu_provenienza": p.cu_provenienza,
+        "compagnia":             p.compagnia_provenienza,
+        "codice_compagnia":      p.compagnia_provenienza_codice,
+        "numero_polizza":        p.numero_polizza,
+        "scadenza_attestato":    _data_it(p.scadenza_attestato),
+        "forma_tariffaria":      p.forma_tariffaria.value if p.forma_tariffaria else "",
+        "codice_iur":            p.codice_iur,
+        "storico_sinistri":      _riassunto_sinistri(p.sinistri),
+    }
+
+    campi = {}
+    for dato, valore in valori.items():
+        colonna = col.get(dato)
+        if colonna and not _colonna_calcolata(colonna):
+            campi[colonna] = valore
+
+    campi[col.get("stato_bot", "Stato Bot Estrazione")] = "Dati Estratti"
+    return campi
 
 
 def _campo_rifiutato_da_airtable(risposta) -> Optional[str]:
@@ -259,6 +411,7 @@ def _campo_rifiutato_da_airtable(risposta) -> Optional[str]:
         r'Field\s*"([^"]+)"\s*cannot accept',
         r'for field\s+"?(.+?)"?\s*$',
         r'field\s*"([^"]+)"',
+        r'computed field\s*"?([^"]+?)"?\s*$',
     ):
         m = re.search(pattern, messaggio.strip(), re.IGNORECASE)
         if m:
@@ -317,10 +470,14 @@ async def _estrai_e_salva(record_id: str, targa: str):
     }
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Trattative/{record_id}"
 
+    col = _mappa_colonne()
+    col_stato = col.get("stato_bot", "Stato Bot Estrazione")
+    col_note = col.get("note_bot", "Note e Errori Bot")
+
     print(f"[BDA] === Make ha chiesto {targa} (record {record_id}) ===", flush=True)
     try:
         requests.patch(url, headers=headers,
-                       json={"fields": {"Stato Bot Estrazione": "In Corso"}}, timeout=30)
+                       json={"fields": {col_stato: "In Corso"}}, timeout=30)
     except Exception as e:
         print(f"[BDA] non riesco a segnare 'In Corso': {e}", flush=True)
 
@@ -340,8 +497,8 @@ async def _estrai_e_salva(record_id: str, targa: str):
         else:
             print(f"[BDA] === salvataggio fallito: {esito['errore']} ===", flush=True)
             requests.patch(url, headers=headers, json={"fields": {
-                "Stato Bot Estrazione": "Errore",
-                "Note e Errori Bot": f"Airtable: {esito['errore']}"[:1000],
+                col_stato: "Errore",
+                col_note: f"Airtable: {esito['errore']}"[:1000],
             }}, timeout=30)
 
     except Exception as e:
@@ -349,8 +506,8 @@ async def _estrai_e_salva(record_id: str, targa: str):
         print(f"[BDA] === ERRORE su {targa} ===\n{traceback.format_exc()}", flush=True)
         try:
             requests.patch(url, headers=headers, json={"fields": {
-                "Stato Bot Estrazione": "Errore",
-                "Note e Errori Bot": f"{type(e).__name__}: {str(e)[:800]}",
+                col_stato: "Errore",
+                col_note: f"{type(e).__name__}: {str(e)[:800]}",
             }}, timeout=30)
         except Exception:
             pass
