@@ -64,11 +64,19 @@ URL_RCAUTO_DIRETTO = os.getenv(
     f"{BASE_URL}/Danni/essigRA/danni/rcauto/paginaD1.do",
 )
 
-# Voci di menu da percorrere per arrivare alla maschera BDA.
+# Pagina di partenza dentro Leonardo, da cui si apre il menu Strumenti.
+LEONARDO_URL = os.getenv(
+    "UNIPOL_LEONARDO_URL",
+    f"{BASE_URL}/WorkspaceWeb/app/configuratore_questionari/questionario",
+)
+
+# Percorso reale dentro il menu Strumenti di Leonardo:
+#     Strumenti -> (sezione SERVIZI) DANNI -> RCA AUTO -> CONSULTAZIONE BDA
+# L'ultima voce apre una scheda nuova del browser.
 PERCORSO_MENU = [
     v.strip() for v in os.getenv(
         "UNIPOL_PERCORSO_BDA",
-        "RAMI AUTO|IBDV ANIA ricerca per targa",
+        "Strumenti|DANNI|RCA AUTO|CONSULTAZIONE BDA",
     ).split("|") if v.strip()
 ]
 
@@ -122,7 +130,8 @@ class SessioneUnipol:
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._contesto: Optional[BrowserContext] = None
-        self._pagina: Optional[Page] = None
+        self._pagina: Optional[Page] = None            # scheda BDA (dove si lavora)
+        self._pagina_leonardo: Optional[Page] = None   # scheda con il menu Strumenti
         self._lock = asyncio.Lock()
         self._ultimo_uso: Optional[datetime] = None
         self._sulla_maschera = False       # siamo gia' sulla maschera di ricerca?
@@ -153,7 +162,8 @@ class SessioneUnipol:
                     await getattr(risorsa, chiudi)()
                 except Exception:
                     pass
-        self._playwright = self._browser = self._contesto = self._pagina = None
+        self._playwright = self._browser = self._contesto = None
+        self._pagina = self._pagina_leonardo = None
         self._sulla_maschera = False
 
     async def _apri_browser(self) -> None:
@@ -257,16 +267,39 @@ class SessioneUnipol:
             return True
         return bool(_SEGNALI_SESSIONE_PERSA.search(testo[:4_000]))
 
-    async def _clic_testo(self, testo: str, tentativi: int = 10) -> bool:
-        for _ in range(tentativi):
-            for frame in [self._pagina.main_frame, *self._pagina.frames]:
+    async def _clic_menu(self, pagina: Page, testo: str, tentativi: int = 12) -> bool:
+        """
+        Clicca una voce del menu Strumenti.
+
+        La corrispondenza esatta viene prima di quella parziale, ed e' una
+        precauzione necessaria: sotto il menu aperto la pagina di Leonardo
+        contiene la scritta "ALTRI PRODOTTI DANNI", che con una ricerca
+        parziale verrebbe scambiata per la voce "DANNI" del menu.
+        """
+        for tentativo in range(tentativi):
+            for frame in [pagina.main_frame, *pagina.frames]:
+                # 1) corrispondenza esatta, ignorando maiuscole/minuscole
                 try:
-                    el = frame.get_by_text(testo, exact=False).first
-                    if await el.is_visible(timeout=300):
-                        await el.click(force=True)
-                        return True
+                    esatto = frame.get_by_text(
+                        re.compile(rf"^\s*{re.escape(testo)}\s*$", re.IGNORECASE)
+                    )
+                    for i in range(min(await esatto.count(), 5)):
+                        el = esatto.nth(i)
+                        if await el.is_visible(timeout=250):
+                            await el.click(force=True)
+                            return True
                 except Exception:
-                    continue
+                    pass
+
+                # 2) solo dopo qualche giro, corrispondenza parziale
+                if tentativo >= 4:
+                    try:
+                        el = frame.get_by_text(testo, exact=False).first
+                        if await el.is_visible(timeout=250):
+                            await el.click(force=True)
+                            return True
+                    except Exception:
+                        pass
             await asyncio.sleep(0.4)
         return False
 
@@ -289,38 +322,69 @@ class SessioneUnipol:
 
     async def _vai_alla_maschera(self) -> None:
         """
-        Si porta sulla maschera 'Identificativo veicolo'.
+        Si porta sulla maschera 'Identificativo veicolo' della consultazione BDA.
 
-        Prima prova l'URL diretto (costa una richiesta e a volte funziona se la
-        conversazione Struts e' ancora aperta), poi ripiega sui menu.
+        Percorso:  Leonardo -> Strumenti -> DANNI -> RCA AUTO -> CONSULTAZIONE BDA
+
+        L'ultima voce apre una scheda nuova del browser, quindi il click viene
+        avvolto in expect_page: senza, il bot resterebbe sulla scheda di
+        Leonardo mentre la maschera si apre altrove.
         """
-        page = self._pagina
+        # Se una scheda BDA e' gia' aperta da una consultazione precedente,
+        # la si riusa invece di rifare tutto il giro.
+        if self._pagina and not self._pagina.is_closed() and await self._campo_targa():
+            self._sulla_maschera = True
+            return
 
-        if URL_RCAUTO_DIRETTO:
-            try:
-                await page.goto(URL_RCAUTO_DIRETTO, wait_until="domcontentloaded", timeout=25_000)
-                await page.wait_for_timeout(1_200)
-                if not await self._pagina_in_errore() and await self._campo_targa():
-                    self._sulla_maschera = True
-                    return
-            except Exception:
-                pass   # atteso: passiamo ai menu
+        leonardo = self._pagina_leonardo or self._pagina
+        if leonardo is None or leonardo.is_closed():
+            leonardo = await self._contesto.new_page()
+        self._pagina_leonardo = leonardo
 
-        # Percorso a menu
-        await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30_000)
-        await page.wait_for_timeout(2_000)
+        await leonardo.goto(LEONARDO_URL, wait_until="domcontentloaded", timeout=30_000)
+        await leonardo.wait_for_timeout(3_000)
 
-        for voce in PERCORSO_MENU:
-            if not await self._clic_testo(voce):
+        voci_intermedie = PERCORSO_MENU[:-1]
+        voce_finale = PERCORSO_MENU[-1]
+
+        for voce in voci_intermedie:
+            if not await self._clic_menu(leonardo, voce):
                 raise ErroreUnipol(
-                    f"Voce di menu '{voce}' non trovata. Se il portale e' cambiato, "
-                    f"aggiorna UNIPOL_PERCORSO_BDA nel file .env "
-                    f"(voci separate dal carattere |)."
+                    f"Voce di menu '{voce}' non trovata dentro Leonardo. "
+                    f"Percorso atteso: {' > '.join(PERCORSO_MENU)}. "
+                    f"Se il portale e' cambiato, correggi UNIPOL_PERCORSO_BDA."
                 )
-            await page.wait_for_timeout(1_500)
+            await leonardo.wait_for_timeout(1_200)
+
+        # L'ultimo click apre la scheda nuova.
+        nuova: Optional[Page] = None
+        try:
+            async with self._contesto.expect_page(timeout=20_000) as attesa:
+                if not await self._clic_menu(leonardo, voce_finale):
+                    raise ErroreUnipol(
+                        f"Voce '{voce_finale}' non trovata nel menu RCA AUTO."
+                    )
+            nuova = await attesa.value
+        except ErroreUnipol:
+            raise
+        except Exception:
+            # Non ha aperto una scheda nuova: forse si e' caricata al suo posto.
+            nuova = None
+
+        if nuova is not None:
+            self._pagina = nuova
+            await nuova.wait_for_load_state("domcontentloaded", timeout=30_000)
+        else:
+            self._pagina = leonardo
+        await self._pagina.wait_for_timeout(2_500)
 
         if await self._campo_targa() is None:
-            raise ErroreUnipol("Maschera BDA raggiunta ma campo Targa non trovato.")
+            if await self._pagina_in_errore():
+                raise SessioneScaduta("Il portale ha risposto con un errore di sessione")
+            raise ErroreUnipol(
+                "Maschera BDA aperta ma campo Targa non trovato. "
+                "Probabile cambio di layout della pagina."
+            )
         self._sulla_maschera = True
 
     async def _torna_alla_maschera(self) -> None:
@@ -342,7 +406,14 @@ class SessioneUnipol:
                 continue
 
         # Il pulsante non c'era o non ha funzionato: si rifa' il percorso.
+        # La scheda BDA vecchia va chiusa, altrimenti se ne accumulano.
         self._sulla_maschera = False
+        if self._pagina and self._pagina is not self._pagina_leonardo:
+            try:
+                await self._pagina.close()
+            except Exception:
+                pass
+            self._pagina = None
         await self._vai_alla_maschera()
 
     # -- consultazione ------------------------------------------------------
