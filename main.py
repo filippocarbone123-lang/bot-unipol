@@ -209,6 +209,11 @@ def _riassunto_sinistri(storico) -> str:
 # scrittura. Invece di ricopiare i nomi a mano e sbagliarli, li si chiede alla
 # tabella stessa. Se domani rinomini o aggiungi una colonna, il bot si adatta.
 
+def _chiave(nome: str) -> str:
+    """Confronto tollerante: ignora maiuscole, spazi, underscore e punti."""
+    return re.sub(r"[^a-z0-9]", "", (nome or "").lower())
+
+
 # Per ogni dato, i nomi con cui potrebbe comparire nella tabella.
 # Il primo della lista e' quello usato se il riconoscimento non trova nulla.
 ALIAS_COLONNE: dict[str, list[str]] = {
@@ -222,6 +227,7 @@ ALIAS_COLONNE: dict[str, list[str]] = {
     "citta":                 ["cli_citta", "cl_citta", "Citta", "Città"],
     "provincia":             ["cli_provincia", "cl_provincia", "Provincia"],
     "cellulare":             ["cli_cel", "cli_cell", "cellulare", "cl_cell"],
+    "email":                 ["cli_email", "Email", "email"],
     "marca":                 ["Marca"],
     "modello":               ["Modello"],
     "kw":                    ["KW"],
@@ -239,52 +245,121 @@ ALIAS_COLONNE: dict[str, list[str]] = {
     "forma_tariffaria":      ["Forma Tariffaria"],
     "codice_iur":            ["Codice IUR"],
     "storico_sinistri":      ["Storico Sinistri ATRC", "Storico Sinistri"],
-    "stato_bot":             ["Stato Bot Estrazione", "stato"],
-    "note_bot":              ["Note e Errori Bot", "Note Bot"],
+    # ATTENZIONE. Qui sotto NON vanno messi alias generici come "stato",
+    # "Note", "scadenza" o "decorrenza". Sono colonne di lavoro dell'agenzia:
+    # se il bot ci ripiegasse sopra, sovrascriverebbe lo stato commerciale
+    # delle trattative con "Dati Estratti". Meglio non scrivere niente che
+    # scrivere nella colonna sbagliata.
+    "stato_bot":             ["Stato Bot Estrazione"],
+    "note_bot":              ["Note e Errori Bot"],
+}
+
+# Colonne di lavoro dell'agenzia: il bot non ci scrive mai, nemmeno se un
+# alias dovesse ripiegarci sopra. Qui NON va 'cliente', che e' invece la
+# colonna corretta per il nominativo estratto.
+COLONNE_INTOCCABILI = {
+    _chiave(n) for n in (
+        "stato", "Note", "scadenza", "decorrenza", "tipo", "data",
+        "premio conf.", "comp. confermata", "forn. scelto",
+        "collaboratore", "num. ric.", "beneficiario", "id",
+    )
 }
 
 _COLONNE_TROVATE: dict[str, str] = {}
 _COLONNE_REALI: list[str] = []
+_ORIGINE_SCHEMA: str = "non ancora letto"
+
+# Tipi di colonna che Airtable calcola da solo: scriverci dentro e' un errore.
+TIPI_NON_SCRIVIBILI = {
+    "formula", "rollup", "lookup", "multipleLookupValues", "count",
+    "createdTime", "lastModifiedTime", "createdBy", "lastModifiedBy",
+    "autoNumber", "button", "externalSyncSource",
+}
 
 
-def _chiave(nome: str) -> str:
-    """Confronto tollerante: ignora maiuscole, spazi, underscore e punti."""
-    return re.sub(r"[^a-z0-9]", "", (nome or "").lower())
-
-
-def _colonne_della_tabella() -> list[str]:
+def _schema_da_metadati() -> list[str]:
     """
-    Chiede ad Airtable un campione di record e raccoglie i nomi di colonna.
+    Chiede ad Airtable l'elenco completo delle colonne.
 
-    Airtable restituisce solo i campi valorizzati in ciascun record, per cui
-    si guardano cento record e si uniscono i nomi: una colonna sempre vuota
-    resta invisibile, ma per quelle il ripiego sul primo alias e la
-    sanificazione degli errori 422 fanno comunque il loro lavoro.
+    E' la strada giusta: restituisce tutte le colonne, comprese quelle vuote,
+    e dice anche di che tipo sono. Richiede pero' che il token abbia il
+    permesso schema.bases:read. Se non ce l'ha, Airtable risponde 403 e si
+    passa al metodo di ripiego.
     """
-    global _COLONNE_REALI
-    if _COLONNE_REALI:
-        return _COLONNE_REALI
-
     try:
         res = requests.get(
-            f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Trattative",
+            f"https://api.airtable.com/v0/meta/bases/{AIRTABLE_BASE_ID}/tables",
             headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}"},
-            params={"maxRecords": 100},
             timeout=30,
         )
         if res.status_code != 200:
-            print(f"[BDA] non riesco a leggere le colonne: HTTP {res.status_code}", flush=True)
+            print(f"[BDA] metadati non disponibili (HTTP {res.status_code}): "
+                  f"al token manca il permesso schema.bases:read", flush=True)
             return []
-        nomi: set[str] = set()
-        for record in res.json().get("records", []):
-            nomi.update(record.get("fields", {}).keys())
-        _COLONNE_REALI = sorted(nomi)
-        print(f"[BDA] riconosciute {len(_COLONNE_REALI)} colonne nella tabella Trattative",
-              flush=True)
-    except Exception as e:
-        print(f"[BDA] riconoscimento colonne non riuscito: {e}", flush=True)
-        return []
 
+        for tabella in res.json().get("tables", []):
+            if _chiave(tabella.get("name", "")) != _chiave("Trattative"):
+                continue
+            nomi = [
+                campo["name"] for campo in tabella.get("fields", [])
+                if campo.get("type") not in TIPI_NON_SCRIVIBILI
+            ]
+            scartate = len(tabella.get("fields", [])) - len(nomi)
+            print(f"[BDA] schema completo: {len(nomi)} colonne scrivibili "
+                  f"({scartate} calcolate, escluse)", flush=True)
+            return nomi
+    except Exception as e:
+        print(f"[BDA] lettura metadati non riuscita: {e}", flush=True)
+    return []
+
+
+def _schema_da_campione() -> list[str]:
+    """
+    Ripiego: ricava i nomi dai record esistenti.
+
+    Airtable elenca solo i campi valorizzati, quindi una colonna vuota resta
+    invisibile. Per questo si leggono piu' pagine invece di cento record soli:
+    le colonne aggiunte di recente sono piene solo nelle righe recenti, e
+    fermandosi alla prima pagina non si vedrebbero mai.
+    """
+    nomi: set[str] = set()
+    offset = None
+    try:
+        for _ in range(6):
+            params = {"pageSize": 100}
+            if offset:
+                params["offset"] = offset
+            res = requests.get(
+                f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Trattative",
+                headers={"Authorization": f"Bearer {AIRTABLE_API_KEY}"},
+                params=params, timeout=30,
+            )
+            if res.status_code != 200:
+                break
+            corpo = res.json()
+            for record in corpo.get("records", []):
+                nomi.update(record.get("fields", {}).keys())
+            offset = corpo.get("offset")
+            if not offset:
+                break
+    except Exception as e:
+        print(f"[BDA] lettura campione non riuscita: {e}", flush=True)
+
+    print(f"[BDA] colonne ricavate dai record: {len(nomi)} "
+          f"(le colonne sempre vuote non compaiono)", flush=True)
+    return sorted(nomi)
+
+
+def _colonne_della_tabella() -> list[str]:
+    global _COLONNE_REALI, _ORIGINE_SCHEMA
+    if _COLONNE_REALI:
+        return _COLONNE_REALI
+
+    dai_metadati = _schema_da_metadati()
+    if dai_metadati:
+        _COLONNE_REALI, _ORIGINE_SCHEMA = dai_metadati, "schema completo"
+    else:
+        _COLONNE_REALI, _ORIGINE_SCHEMA = _schema_da_campione(), "campione di record (parziale)"
     return _COLONNE_REALI
 
 
@@ -334,11 +409,23 @@ async def elenco_colonne():
     """
     mappa = _mappa_colonne()
     reali = set(_colonne_della_tabella())
+    mancanti = sorted(dato for dato, colonna in mappa.items() if colonna not in reali)
     return {
+        "come_ho_letto_le_colonne": _ORIGINE_SCHEMA,
+        "avvertenza": (
+            "Elenco parziale: ricavato dai record esistenti, quindi le colonne "
+            "sempre vuote non compaiono e risultano mancanti anche se esistono. "
+            "Per un elenco completo aggiungi il permesso schema.bases:read al "
+            "token Airtable."
+            if "campione" in _ORIGINE_SCHEMA else
+            "Elenco completo, letto dallo schema della base."
+        ),
+        "quante_colonne": len(reali),
         "colonne_trovate_in_tabella": sorted(reali),
         "dove_scrive_ogni_dato": mappa,
-        "dati_senza_colonna": sorted(
-            dato for dato, colonna in mappa.items() if colonna not in reali
+        "dati_senza_colonna": mancanti,
+        "colonne_protette_mai_scritte": sorted(
+            c for c in reali if _chiave(c) in COLONNE_INTOCCABILI
         ),
     }
 
@@ -361,6 +448,13 @@ def _campi_airtable(dati: dict) -> dict:
         "codice_fiscale":        c.codice_fiscale,
         "nominativo":            c.nominativo,
         "data_nascita":          _data_it(c.data_nascita),
+        "indirizzo":             c.residenza.via,
+        "civico":                c.residenza.civico,
+        "cap":                   c.residenza.cap,
+        "citta":                 c.residenza.citta,
+        "provincia":             c.residenza.provincia,
+        "cellulare":             c.cellulare,
+        "email":                 c.email,
         "marca":                 v.marca,
         "modello":               v.modello,
         "kw":                    v.kw,
@@ -383,10 +477,17 @@ def _campi_airtable(dati: dict) -> dict:
     campi = {}
     for dato, valore in valori.items():
         colonna = col.get(dato)
-        if colonna and not _colonna_calcolata(colonna):
-            campi[colonna] = valore
+        if not colonna or _colonna_calcolata(colonna):
+            continue
+        if _chiave(colonna) in COLONNE_INTOCCABILI:
+            print(f"[BDA] non scrivo in '{colonna}': e' una colonna di lavoro "
+                  f"dell'agenzia", flush=True)
+            continue
+        campi[colonna] = valore
 
-    campi[col.get("stato_bot", "Stato Bot Estrazione")] = "Dati Estratti"
+    stato = col.get("stato_bot", "Stato Bot Estrazione")
+    if _chiave(stato) not in COLONNE_INTOCCABILI:
+        campi[stato] = "Dati Estratti"
     return campi
 
 
