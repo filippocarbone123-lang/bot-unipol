@@ -131,6 +131,22 @@ _JS_ESTRAI = r"""
 () => {
     const testo = (el) => (el ? (el.innerText || el.textContent || '') : '').replace(/\u00a0/g,' ').trim();
 
+    // Testo dell'etichetta associata a un controllo (serve per i radio).
+    const etichettaDi = (el) => {
+        if (el.id) {
+            const l = document.querySelector(`label[for="${el.id}"]`);
+            if (l) return testo(l);
+        }
+        // Su queste pagine il testo sta subito dopo il radio, senza <label>
+        let n = el.nextSibling;
+        while (n) {
+            const t = (n.textContent || '').replace(/\u00a0/g,' ').trim();
+            if (t) return t;
+            n = n.nextSibling;
+        }
+        return '';
+    };
+
     // Valore "vero" di un controllo di form
     const valoreControllo = (el) => {
         const tag = el.tagName.toLowerCase();
@@ -139,7 +155,14 @@ _JS_ESTRAI = r"""
             return opt ? opt.text.trim() : '';
         }
         if (el.type === 'checkbox') return el.checked ? 'SI' : 'NO';
-        if (el.type === 'radio')    return el.checked ? 'SI' : '';
+        if (el.type === 'radio') {
+            // Un gruppo di radio ha piu' pulsanti: conta solo quello scelto, e
+            // conta la sua etichetta. Rispondere 'SI' perche' un radio del
+            // gruppo e' selezionato direbbe il contrario del vero quando la
+            // scelta e' 'No'.
+            if (!el.checked) return '';
+            return etichettaDi(el) || 'SI';
+        }
         return (el.value || el.getAttribute('value') || '').trim();
     };
 
@@ -162,11 +185,22 @@ _JS_ESTRAI = r"""
             const etichetta = testo(celle[i]);
             if (!etichetta || celle[i].querySelector('input, select, textarea')) continue;
 
-            // Raccoglie i controlli nella cella successiva (a volte nelle due successive)
-            let controlli = Array.from(celle[i + 1].querySelectorAll('input, select, textarea'));
-            if (!controlli.length && celle[i + 2]) {
-                controlli = Array.from(celle[i + 2].querySelectorAll('input, select, textarea'));
+            // Un campo puo' avere piu' valori distribuiti su celle diverse:
+            // "C.F./P.I contraente" ha il codice fiscale in una cella e il
+            // nominativo in quella dopo. Leggendo solo la cella successiva il
+            // nome andava perso.
+            let controlli = [];
+            for (let k = i + 1; k < Math.min(i + 4, celle.length); k++) {
+                const trovati = Array.from(celle[k].querySelectorAll('input, select, textarea'));
+                if (trovati.length) {
+                    controlli.push(...trovati);
+                    continue;
+                }
+                // Cella con del testo e senza controlli: e' l'etichetta
+                // successiva, quindi il campo corrente finisce qui.
+                if (testo(celle[k])) break;
             }
+
             if (controlli.length) {
                 aggiungi(etichetta, controlli.map(valoreControllo));
             } else {
@@ -478,12 +512,17 @@ def _parse_sinistri(blocco: Optional[dict]) -> StoricoSinistri:
         elif "principale" in etichetta:
             responsabilita_corrente = TipoResponsabilita.PRINCIPALE
             categoria = None
-        elif "cose" in etichetta:
-            categoria = CategoriaDanno.COSE
-        elif "persone" in etichetta:
-            categoria = CategoriaDanno.PERSONE
+        # L'ordine dei tre controlli qui sotto e' obbligatorio e non e' un
+        # dettaglio di stile. La riga dei misti si chiama per esteso
+        # "MISTI (tra persone e cose)": cercando prima "cose" o "persone" i
+        # sinistri misti verrebbero contati nella categoria sbagliata, e un
+        # conteggio sbagliato dei sinistri produce un premio sbagliato.
         elif "misti" in etichetta:
             categoria = CategoriaDanno.MISTI
+        elif "persone" in etichetta:
+            categoria = CategoriaDanno.PERSONE
+        elif "cose" in etichetta:
+            categoria = CategoriaDanno.COSE
         else:
             continue
 
@@ -543,8 +582,8 @@ def traduci_pagina_bda(grezzo: dict) -> tuple[PosizioneAssicurativa, Veicolo, Pe
         cu_assegnazione=_primo(coppie, "Classe CU di assegnazione"),
         classe_interna_provenienza=_primo(coppie, "Classe IMPRESA di provenienza"),
         classe_interna_assegnazione=_primo(coppie, "Classe IMPRESA di assegnazione"),
-        polizza_gratuita=_primo(coppie, "Polizza Gratuita").upper() == "SI",
-        cu_art_134bis=_primo(coppie, "CU art 134bis CAP").upper() == "SI",
+        polizza_gratuita=_primo(coppie, "Polizza Gratuita").upper().startswith("S"),
+        cu_art_134bis=_primo(coppie, "CU art 134bis CAP").upper().startswith("S"),
         franchigie_non_corrisposte=_intero(_primo(coppie, "Franchigie non corrisposte")) or 0,
         importo_franchigie=_decimale(_primo(coppie, "Importo")),
         codice_iur=_primo(coppie, "Codice IUR"),
