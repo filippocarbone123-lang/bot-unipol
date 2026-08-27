@@ -246,6 +246,15 @@ class RigaSinistri(_Base):
     responsabilita: TipoResponsabilita
     categoria: Optional[CategoriaDanno] = None   # None = riga totale
     numero: int = 0
+    disponibile: bool = True
+    """
+    False quando il portale scrive 'NA' invece di un numero.
+
+    'NA' e '00' non sono la stessa cosa: 00 significa nessun sinistro, NA
+    significa che per quell'anno il dato non esiste perche' l'attestato non
+    lo copre. Dichiarare zero sinistri dove il dato manca sarebbe una
+    dichiarazione falsa nella richiesta di preventivo.
+    """
 
 
 class StoricoSinistri(_Base):
@@ -260,8 +269,25 @@ class StoricoSinistri(_Base):
         return sorted({r.anno for r in self.righe})
 
     @property
+    def anni_coperti(self) -> list[int]:
+        """
+        Anni per cui l'attestato riporta davvero dei valori.
+
+        Il conteggio guarda solo le righe di dettaglio (cose, persone, misti).
+        Le righe di totale contengono sempre '--', che non e' un dato mancante
+        ma un trattino di riempimento del portale: contarle direbbe che ogni
+        anno e' coperto anche quando il dettaglio e' tutto NA.
+        """
+        dettaglio = [r for r in self.righe if r.categoria is not None]
+        anni_na = {r.anno for r in dettaglio if not r.disponibile}
+        return sorted({r.anno for r in dettaglio} - anni_na)
+
+    def anno_coperto(self, anno: int) -> bool:
+        return anno in self.anni_coperti
+
+    @property
     def totale_sinistri(self) -> int:
-        return sum(r.numero for r in self.righe if r.categoria is None)
+        return sum(r.numero for r in self.righe if r.categoria is None and r.disponibile)
 
     def valore(self, anno: int, resp: TipoResponsabilita,
                cat: Optional[CategoriaDanno] = None) -> int:
@@ -271,9 +297,18 @@ class StoricoSinistri(_Base):
         return 0
 
     def pulito(self) -> bool:
-        """Nessun sinistro negli ultimi 5 anni: molte compagnie applicano sconti."""
+        """
+        Nessun sinistro negli ultimi cinque anni.
+
+        Gli anni con dato mancante non contano come puliti: se l'attestato non
+        copre un anno, non si puo' affermare che sia andato bene.
+        """
         limite = date.today().year - 5
-        return all(r.numero == 0 for r in self.righe if r.anno >= limite)
+        recenti = [r for r in self.righe
+                   if r.anno >= limite and r.categoria is not None]
+        if not recenti or any(not r.disponibile for r in recenti):
+            return False
+        return all(r.numero == 0 for r in recenti)
 
 
 class PosizioneAssicurativa(_Base):

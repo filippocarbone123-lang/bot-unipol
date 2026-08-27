@@ -321,17 +321,41 @@ class SessioneUnipol:
         return False
 
     async def _campo_targa(self):
-        """Restituisce il campo Targa se siamo sulla maschera, altrimenti None."""
-        for selettore in ('input[name*="targa" i]', 'input[id*="targa" i]'):
+        """
+        Restituisce il campo Targa della maschera di ricerca, o None.
+
+        Il controllo e' volutamente severo. La pagina dei dati veicolo mostra
+        anch'essa un campo "Targa", ma di sola lettura e con dentro la targa
+        appena cercata: scambiandola per la maschera, il bot proverebbe a
+        scriverci sopra la targa successiva e resterebbe bloccato.
+
+        Due difese: il campo dev'essere davvero scrivibile, e nella pagina
+        dev'esserci la dicitura "Formato targa", che compare solo sulla
+        maschera di ricerca.
+        """
+        for selettore in ('input[name*="targa" i]:not([readonly]):not([disabled])',
+                          'input[id*="targa" i]:not([readonly]):not([disabled])'):
             loc = self._pagina.locator(selettore).first
-            if await loc.count() and await loc.is_visible():
-                return loc
-        # Fallback: la maschera ha l'etichetta "Targa" accanto a un input
+            try:
+                if await loc.count() and await loc.is_editable(timeout=800):
+                    return loc
+            except Exception:
+                continue
+
+        # Ripiego: si accetta il primo campo di testo solo se la pagina e'
+        # davvero la maschera di ricerca e solo se il campo e' scrivibile.
         try:
             testo = await self._pagina.inner_text("body", timeout=3_000)
-            if re.search(r"\bIdentificativo veicolo\b|\bFormato targa\b", testo, re.I):
-                loc = self._pagina.locator('input[type="text"]').first
-                if await loc.count():
+        except Exception:
+            return None
+        if not re.search(r"Formato\s+targa", testo, re.I):
+            return None
+
+        campi = self._pagina.locator('input[type="text"]:not([readonly]):not([disabled])')
+        try:
+            for i in range(min(await campi.count(), 4)):
+                loc = campi.nth(i)
+                if await loc.is_editable(timeout=500):
                     return loc
         except Exception:
             pass
@@ -410,24 +434,38 @@ class SessioneUnipol:
 
     async def _torna_alla_maschera(self) -> None:
         """
-        Dopo una consultazione, il pulsante 'Indietro' riporta alla ricerca.
-        E' la scorciatoia che rende veloce il ciclo su molte targhe.
-        """
-        for selettore in ('input[value*="Indietro" i]', 'button:has-text("Indietro")',
-                          'a:has-text("Indietro")'):
-            bottone = self._pagina.locator(selettore).first
-            try:
-                if await bottone.count() and await bottone.is_visible(timeout=800):
-                    await bottone.click(force=True)
-                    await self._pagina.wait_for_load_state("domcontentloaded", timeout=20_000)
-                    await self._pagina.wait_for_timeout(800)
-                    if await self._campo_targa():
-                        return
-            except Exception:
-                continue
+        Riporta il bot alla maschera di ricerca.
 
-        # Il pulsante non c'era o non ha funzionato: si rifa' il percorso.
+        Il pulsante "Indietro" va premuto piu' volte: dalla pagina attestato si
+        torna alla pagina dati veicolo, e solo da li' alla ricerca. Premerlo
+        una volta sola lasciava il bot sulla pagina intermedia, dove il campo
+        Targa esiste ma e' di sola lettura.
+        """
+        for passo in range(3):
+            premuto = False
+            for selettore in ('input[value*="Indietro" i]',
+                              'button:has-text("Indietro")',
+                              'a:has-text("Indietro")'):
+                bottone = self._pagina.locator(selettore).first
+                try:
+                    if await bottone.count() and await bottone.is_visible(timeout=800):
+                        await bottone.click(force=True)
+                        await self._pagina.wait_for_load_state("domcontentloaded", timeout=20_000)
+                        await self._pagina.wait_for_timeout(1_000)
+                        premuto = True
+                        break
+                except Exception:
+                    continue
+
+            if not premuto:
+                break
+            if await self._campo_targa():
+                _log(f"tornato alla maschera di ricerca ({passo + 1} clic su Indietro)")
+                return
+
+        # Indietro non ha funzionato: si rifa' il percorso dai menu.
         # La scheda BDA vecchia va chiusa, altrimenti se ne accumulano.
+        _log("Indietro non ha riportato alla ricerca, rifaccio il percorso dai menu")
         self._sulla_maschera = False
         if self._pagina and self._pagina is not self._pagina_leonardo:
             try:
@@ -466,6 +504,12 @@ class SessioneUnipol:
             await self._vai_alla_maschera()
 
         campo = await self._campo_targa()
+        if campo is None:
+            # Non siamo sulla maschera: si rifa' il percorso una volta sola.
+            _log("maschera non disponibile, ricostruisco il percorso")
+            self._sulla_maschera = False
+            await self._vai_alla_maschera()
+            campo = await self._campo_targa()
         if campo is None:
             raise SessioneScaduta("Maschera di ricerca non disponibile")
 

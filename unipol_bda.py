@@ -529,14 +529,22 @@ def _parse_sinistri(blocco: Optional[dict]) -> StoricoSinistri:
         for idx, anno in enumerate(anni):
             if idx >= len(valori):
                 break
-            grezzo = (valori[idx] or "").strip()
-            if grezzo in ("", "--", "-"):
-                numero = 0
+            grezzo = (valori[idx] or "").strip().upper()
+
+            # 'NA' = dato non disponibile per quell'anno.
+            # '--' = riga di totale, il portale non la valorizza.
+            # '00' = zero sinistri, che e' un'informazione vera e diversa.
+            if grezzo in ("NA", "N.A.", "N/A"):
+                disponibile, numero = False, 0
+            elif grezzo in ("", "--", "-"):
+                disponibile, numero = True, 0
             else:
-                numero = _intero(grezzo) or 0
+                disponibile, numero = True, (_intero(grezzo) or 0)
+
             storico.righe.append(
                 RigaSinistri(anno=anno, responsabilita=responsabilita_corrente,
-                             categoria=categoria, numero=numero)
+                             categoria=categoria, numero=numero,
+                             disponibile=disponibile)
             )
 
     return storico
