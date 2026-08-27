@@ -28,6 +28,7 @@ il motore 1 continua a lavorare: il servizio non va mai giu' per quel motivo.
 import asyncio
 import os
 import re
+from typing import Optional
 from datetime import datetime
 
 import pyotp
@@ -164,8 +165,15 @@ async def leggi_risultato():
 
 
 def _data_it(valore) -> str:
-    """Formato gg/mm/aaaa, quello che si aspettano le colonne di Airtable."""
-    return valore.strftime("%d/%m/%Y") if valore else ""
+    """
+    Formato aaaa-mm-gg.
+
+    Le colonne di tipo Data di Airtable accettano solo il formato
+    internazionale: mandando 30/08/2021 rispondono "Cannot parse date value".
+    Le colonne di tipo Testo accettano comunque questa forma, quindi va bene
+    per entrambi i casi e non serve sapere in anticipo com'e' fatta la colonna.
+    """
+    return valore.strftime("%Y-%m-%d") if valore else ""
 
 
 def _riassunto_sinistri(storico) -> str:
@@ -197,10 +205,16 @@ def _campi_airtable(dati: dict) -> dict:
 
     return {
         "targa": v.targa,
-        # Anagrafica
+        # Anagrafica.
+        # Alcune colonne compaiono con nomi diversi a seconda della tabella:
+        # si mandano entrambe le versioni e Airtable scarta quella che non
+        # conosce, invece di perdere il dato perche' il nome non combacia.
         "Codice Fiscale": c.codice_fiscale,
+        "cf trattative": c.codice_fiscale,
         "Nome": c.nominativo,
+        "cliente": c.nominativo,
         "cl_datanascita": _data_it(c.data_nascita),
+        "Data di nascita": _data_it(c.data_nascita),
         # Veicolo
         "Marca": v.marca,
         "Modello": v.modello,
@@ -222,6 +236,34 @@ def _campi_airtable(dati: dict) -> dict:
         "Storico Sinistri": _riassunto_sinistri(p.sinistri),
         "Stato Bot Estrazione": "Dati Estratti",
     }
+
+
+def _campo_rifiutato_da_airtable(risposta) -> Optional[str]:
+    """
+    Ricava dal messaggio di errore il nome della colonna che ha fatto fallire
+    la scrittura.
+
+    Airtable segnala il problema in almeno tre formulazioni diverse:
+        Unknown field name: "Telaio"
+        Field "KW" cannot accept the provided value
+        Cannot parse date value "30/08/2021" for field Data immatricolazione
+    L'ultima non ha il nome fra virgolette, ed e' quella che prima sfuggiva.
+    """
+    try:
+        messaggio = risposta.json().get("error", {}).get("message", "")
+    except Exception:
+        messaggio = risposta.text or ""
+
+    for pattern in (
+        r'Unknown field name:\s*"?([^"]+?)"?\s*$',
+        r'Field\s*"([^"]+)"\s*cannot accept',
+        r'for field\s+"?(.+?)"?\s*$',
+        r'field\s*"([^"]+)"',
+    ):
+        m = re.search(pattern, messaggio.strip(), re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return None
 
 
 def _scrivi_su_airtable(record_id: str, campi: dict) -> dict:
@@ -254,18 +296,12 @@ def _scrivi_su_airtable(record_id: str, campi: dict) -> dict:
                     "scartati": scartati}
 
         testo = res.text
-        campo = None
-        for pattern in (r'Unknown field name:\s*\\?"([^\\"]+)\\?"',
-                        r'Field\s*\\?"([^\\"]+)\\?"\s*cannot accept'):
-            m = re.search(pattern, testo, re.IGNORECASE)
-            if m:
-                campo = m.group(1)
-                break
+        campo = _campo_rifiutato_da_airtable(res)
 
         if campo and campo in payload:
             payload.pop(campo)
             scartati.append(campo)
-            print(f"[BDA] colonna '{campo}' non presente in Airtable, la salto", flush=True)
+            print(f"[BDA] Airtable rifiuta '{campo}', la salto", flush=True)
             continue
 
         return {"ok": False, "errore": testo[:300], "scartati": scartati}
