@@ -97,6 +97,17 @@ _SEGNALI_SESSIONE_PERSA = re.compile(
 )
 
 
+def _log(messaggio: str) -> None:
+    """
+    Scrive una riga nei log di Render.
+
+    Serve a vedere dove si ferma il bot quando qualcosa non va: senza questo
+    diario, un errore di rete o un menu che cambia nome lasciano solo una
+    pagina bianca e nessun indizio.
+    """
+    print(f"[BDA] {messaggio}", flush=True)
+
+
 class SessioneScaduta(ErroreUnipol):
     """La sessione sul portale non e' piu' valida: serve un nuovo login."""
 
@@ -201,6 +212,7 @@ class SessioneUnipol:
             )
 
         page = self._pagina
+        _log("1/6 apertura pagina di login")
         await page.goto(LOGIN_URL, wait_until="commit", timeout=40_000)
         await page.wait_for_timeout(1_500)
 
@@ -208,6 +220,7 @@ class SessioneUnipol:
         # entrare e la maschera di login non compare.
         campo_user = page.locator('input[name="Username" i], input[name="username" i]').first
         if not await campo_user.count():
+            _log("1/6 sessione precedente ancora valida, login non necessario")
             await self._salva_stato()
             return
 
@@ -228,11 +241,14 @@ class SessioneUnipol:
         await conferma.wait_for(state="visible", timeout=25_000)
         await conferma.click()
 
+        _log("2/6 utente e password inviati, ora il codice OTP")
         await self._inserisci_otp()
 
         # Il portale registra la sessione di sicurezza lato server.
+        _log("3/6 OTP inviato, attesa registrazione sessione (6s)")
         await asyncio.sleep(6)
         await self._salva_stato()
+        _log("3/6 login completato")
 
     async def _inserisci_otp(self) -> None:
         """
@@ -341,6 +357,7 @@ class SessioneUnipol:
             leonardo = await self._contesto.new_page()
         self._pagina_leonardo = leonardo
 
+        _log(f"4/6 apertura Leonardo: {LEONARDO_URL}")
         await leonardo.goto(LEONARDO_URL, wait_until="domcontentloaded", timeout=30_000)
         await leonardo.wait_for_timeout(3_000)
 
@@ -354,6 +371,7 @@ class SessioneUnipol:
                     f"Percorso atteso: {' > '.join(PERCORSO_MENU)}. "
                     f"Se il portale e' cambiato, correggi UNIPOL_PERCORSO_BDA."
                 )
+            _log(f"5/6 cliccata voce di menu '{voce}'")
             await leonardo.wait_for_timeout(1_200)
 
         # L'ultimo click apre la scheda nuova.
@@ -376,6 +394,7 @@ class SessioneUnipol:
             await nuova.wait_for_load_state("domcontentloaded", timeout=30_000)
         else:
             self._pagina = leonardo
+        _log("6/6 scheda BDA aperta" if nuova is not None else "6/6 pagina caricata nella stessa scheda")
         await self._pagina.wait_for_timeout(2_500)
 
         if await self._campo_targa() is None:
@@ -385,6 +404,7 @@ class SessioneUnipol:
                 "Maschera BDA aperta ma campo Targa non trovato. "
                 "Probabile cambio di layout della pagina."
             )
+        _log("maschera di ricerca pronta")
         self._sulla_maschera = True
 
     async def _torna_alla_maschera(self) -> None:
@@ -471,8 +491,10 @@ class SessioneUnipol:
         if await self._pagina_in_errore():
             raise SessioneScaduta("Il portale ha risposto con un errore di sessione")
 
+        _log(f"targa {targa} inviata, lettura della pagina risultato")
         grezzo = await page.evaluate(_JS_ESTRAI)
         coppie = grezzo.get("coppie", {})
+        _log(f"letti {len(coppie)} campi dalla pagina")
 
         if not coppie:
             avvisi = " | ".join(grezzo.get("avvisi", [])) or "pagina senza campi"

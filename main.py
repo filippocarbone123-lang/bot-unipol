@@ -66,48 +66,98 @@ except Exception as _e:
     ERRORE_BDA = f"{type(_e).__name__}: {_e}"
 
 
+# --- Archivio dei risultati -------------------------------------------------
+#
+# Render chiude la connessione dopo circa novanta secondi. Una consultazione
+# BDA ne richiede il doppio (login, OTP, quattro menu, ricerca), quindi
+# l'endpoint non puo' far aspettare chi lo chiama: risponderebbe sempre 502.
+#
+# Percio' il lavoro parte in sottofondo e il risultato si ritira dopo, come al
+# bar: prima si ordina, poi si ritira. Lo stesso schema del bot preventivatore.
+
+ULTIMO_RISULTATO = {"stato": "mai avviato"}
+
+
+async def _lavora_targa(targa: str):
+    """Esegue la consultazione e deposita l'esito in ULTIMO_RISULTATO."""
+    global ULTIMO_RISULTATO
+    ULTIMO_RISULTATO = {
+        "stato": "in corso",
+        "targa": targa,
+        "avviato_alle": datetime.now().strftime("%H:%M:%S"),
+        "messaggio": "Sto lavorando. Ricarica questa pagina fra un minuto.",
+    }
+    print(f"[BDA] === avvio consultazione targa {targa} ===", flush=True)
+
+    try:
+        async with bot_semaphore:
+            dati = await POOL.consulta(targa)
+
+        ULTIMO_RISULTATO = {
+            "stato": "completato",
+            "targa": dati["targa"],
+            "durata_sec": round(dati["durata_sec"], 1),
+            "posizione": dati["posizione"].model_dump(mode="json"),
+            "veicolo": dati["veicolo"].model_dump(mode="json"),
+            "contraente": dati["contraente"].model_dump(mode="json"),
+        }
+        print(f"[BDA] === completata targa {targa} in "
+              f"{dati['durata_sec']:.1f}s ===", flush=True)
+
+    except Exception as e:
+        # Il tipo di errore e il testo completo finiscono sia nella risposta
+        # sia nei log: e' quello che permette di capire dove si e' fermato.
+        import traceback
+        traccia = traceback.format_exc()
+        print(f"[BDA] === ERRORE su {targa} ===\n{traccia}", flush=True)
+        ULTIMO_RISULTATO = {
+            "stato": "errore",
+            "targa": targa,
+            "tipo_errore": type(e).__name__,
+            "messaggio": str(e)[:600],
+        }
+
+
 @app.get("/bda/{targa}")
-async def consulta_banca_dati(targa: str):
+async def avvia_banca_dati(targa: str, attivita: BackgroundTasks):
     """
-    Legge i dati assicurativi di una targa dalla Banca Dati ANIA.
+    Avvia la consultazione di una targa e risponde SUBITO.
 
-    Esempio da aprire nel browser:
-        https://bot-unipol.onrender.com/bda/DL389LB
-
-    Risponde con compagnia di provenienza, classe CU, scadenza attestato,
-    numero polizza e storico sinistri.
+    Passo 1:  https://bot-unipol.onrender.com/bda/DL389LB
+    Passo 2:  https://bot-unipol.onrender.com/risultato   (dopo un minuto)
     """
     if not MOTORE_BDA_ATTIVO:
         raise HTTPException(503, f"Motore BDA non disponibile. Dettaglio: {ERRORE_BDA}")
 
-    async with bot_semaphore:
-        try:
-            dati = await POOL.consulta(targa)
-        except TargaNonTrovata as e:
-            raise HTTPException(404, str(e))
-        except ErroreUnipol as e:
-            raise HTTPException(502, str(e))
-        except Exception as e:
-            raise HTTPException(500, f"Errore imprevisto: {str(e)[:300]}")
+    if ULTIMO_RISULTATO.get("stato") == "in corso":
+        return {
+            "avviato": False,
+            "messaggio": "C'e' gia' una consultazione in corso. "
+                         "Aspetta che finisca e guarda /risultato.",
+            "in_corso_su": ULTIMO_RISULTATO.get("targa"),
+        }
 
+    attivita.add_task(_lavora_targa, targa)
     return {
-        "targa": dati["targa"],
-        "durata_sec": round(dati["durata_sec"], 1),
-        "posizione": dati["posizione"].model_dump(mode="json"),
-        "veicolo": dati["veicolo"].model_dump(mode="json"),
-        "contraente": dati["contraente"].model_dump(mode="json"),
+        "avviato": True,
+        "targa": targa.upper(),
+        "prossimo_passo": "Apri /risultato fra circa un minuto",
+        "indirizzo": "https://bot-unipol.onrender.com/risultato",
     }
+
+
+@app.get("/risultato")
+async def leggi_risultato():
+    """Mostra l'esito dell'ultima consultazione avviata."""
+    return ULTIMO_RISULTATO
 
 
 @app.post("/bda/lotto")
 async def consulta_lotto(payload: dict):
     """
-    Consulta piu' targhe in una volta sola, riusando la stessa sessione.
+    Consulta piu' targhe riusando la stessa sessione. Lavora in sottofondo.
 
-    Corpo della richiesta:  {"targhe": ["DL389LB", "ES211SV", "EK806RY"]}
-
-    Le targhe in errore non fermano il lotto: finiscono nel risultato con il
-    motivo, e le altre proseguono.
+    Corpo della richiesta:  {"targhe": ["DL389LB", "ES211SV"]}
     """
     if not MOTORE_BDA_ATTIVO:
         raise HTTPException(503, f"Motore BDA non disponibile. Dettaglio: {ERRORE_BDA}")
@@ -139,7 +189,6 @@ async def consulta_lotto(payload: dict):
         "riuscite": len(riuscite),
         "fallite": len(fallite),
         "secondi_totali": round(totale, 1),
-        "secondi_per_targa": round(totale / max(len(targhe), 1), 1),
         "dati": riuscite,
         "errori": fallite,
     }
@@ -700,7 +749,7 @@ async def root():
         "status": "Bot Unipol Online",
         "versione": "2.0",
         "motore_banca_dati": "attivo" if MOTORE_BDA_ATTIVO else "spento",
-        "endpoint": ["/estrai", "/bda/{targa}", "/bda/lotto", "/stato"],
+        "endpoint": ["/estrai", "/bda/{targa}", "/risultato", "/bda/lotto", "/stato"],
     }
 
 
