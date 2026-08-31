@@ -83,12 +83,29 @@ PERCORSO_MENU = [
 # Dopo quanto tempo di inattivita' consideriamo la sessione da rinfrescare.
 MINUTI_VITA_SESSIONE = int(os.getenv("UNIPOL_MINUTI_SESSIONE", "20"))
 
-# Frasi che indicano "sessione persa" o "accesso negato".
+# Frasi che indicano "devi rifare il login": l'accesso non c'e' piu'.
 _SEGNALI_SESSIONE_PERSA = re.compile(
     r"(sessione\s+(non\s+valida|scaduta|terminata)|"
     r"effettua(re)?\s+(nuovamente\s+)?il\s+login|"
     r"accesso\s+negato|utente\s+non\s+autenticato|"
-    r"errore\s+di\s+sistema|HTTP\s+Status\s+(4|5)\d\d)",
+    r"HTTP\s+Status\s+(4|5)\d\d)",
+    re.IGNORECASE,
+)
+
+# Frasi che indicano "il percorso si e' rotto, ma sei ancora dentro".
+#
+# Sono un caso diverso e vanno trattate diversamente: qui rifare il login
+# sarebbe un errore, basta tornare su Leonardo e ripercorrere i menu.
+#
+# La prima riguarda il divieto di sessioni contemporanee: il portale non
+# ammette lo stesso utente collegato due volte. Se qualcuno e' dentro dal
+# proprio browser mentre il bot lavora, uno dei due viene buttato fuori.
+_SEGNALI_PERCORSO_ROTTO = re.compile(
+    r"(sessioni\s+concorrenti|"
+    r"sessione\s+di\s+lavoro\s+deve\s+essere\s+interrotta|"
+    r"errore\s+non\s+previsto|"
+    r"operazione\s+richiesta\s+non\s+e?'?\s*stata\s+completata|"
+    r"errore\s+di\s+sistema)",
     re.IGNORECASE,
 )
 
@@ -105,7 +122,15 @@ def _log(messaggio: str) -> None:
 
 
 class SessioneScaduta(ErroreUnipol):
-    """La sessione sul portale non e' piu' valida: serve un nuovo login."""
+    """L'accesso non c'e' piu': serve un nuovo login."""
+
+
+class PercorsoInterrotto(ErroreUnipol):
+    """
+    La sessione di lavoro dentro l'applicazione si e' rotta, ma l'accesso
+    e' ancora valido. Si risolve tornando su Leonardo e rifacendo i menu,
+    NON rifacendo il login.
+    """
 
 
 class TargaNonTrovata(ErroreUnipol):
@@ -310,12 +335,42 @@ class SessioneUnipol:
         _log(f"  campi  : {' | '.join(campi) if campi else 'nessuno'}")
         _log("--- fine descrizione ---")
 
-    async def _pagina_in_errore(self) -> bool:
+    async def _pagina_in_errore(self) -> str:
+        """
+        Dice che tipo di errore mostra la pagina.
+
+        Restituisce "" se va tutto bene, "percorso" se la sessione di lavoro
+        si e' rotta (si rifanno i menu), "login" se l'accesso e' scaduto.
+        """
         try:
             testo = await self._pagina.inner_text("body", timeout=5_000)
         except Exception:
-            return True
-        return bool(_SEGNALI_SESSIONE_PERSA.search(testo[:4_000]))
+            return "percorso"
+        testa = testo[:4_000]
+        if _SEGNALI_PERCORSO_ROTTO.search(testa):
+            return "percorso"
+        if _SEGNALI_SESSIONE_PERSA.search(testa):
+            return "login"
+        return ""
+
+    async def _chiudi_segnalazione(self) -> bool:
+        """
+        Chiude la finestrella "Segnalazione" che il portale apre sugli errori.
+
+        Finche' resta aperta copre la pagina e ogni clic successivo fallisce.
+        """
+        for selettore in ('input[value*="Chiudi" i]', 'button:has-text("Chiudi")',
+                          'a:has-text("Chiudi")', 'td:has-text("Chiudi")'):
+            try:
+                bottone = self._pagina.locator(selettore).first
+                if await bottone.count() and await bottone.is_visible(timeout=800):
+                    await bottone.click(force=True)
+                    await self._pagina.wait_for_timeout(800)
+                    _log("chiusa la finestrella di segnalazione")
+                    return True
+            except Exception:
+                continue
+        return False
 
     async def _clic_menu(self, pagina: Page, testo: str, tentativi: int = 12) -> bool:
         """
@@ -418,6 +473,7 @@ class SessioneUnipol:
         _log(f"4/6 apertura Leonardo: {LEONARDO_URL}")
         await leonardo.goto(LEONARDO_URL, wait_until="domcontentloaded", timeout=30_000)
         await leonardo.wait_for_timeout(3_000)
+        await self._chiudi_segnalazione()
 
         voci_intermedie = PERCORSO_MENU[:-1]
         voce_finale = PERCORSO_MENU[-1]
@@ -458,11 +514,21 @@ class SessioneUnipol:
         await self._pagina.wait_for_timeout(2_500)
 
         if await self._campo_targa() is None:
-            if await self._pagina_in_errore():
-                raise SessioneScaduta("Il portale ha risposto con un errore di sessione")
+            tipo = await self._pagina_in_errore()
+            if tipo == "percorso":
+                await self._chiudi_segnalazione()
+                raise PercorsoInterrotto(
+                    "La sessione di lavoro si e' interrotta prima di arrivare "
+                    "alla maschera. Se qualcuno e' collegato al portale con lo "
+                    "stesso utente, il portale scollega l'altro: e' il "
+                    "messaggio 'sessioni concorrenti'."
+                )
+            if tipo == "login":
+                raise SessioneScaduta("Il portale chiede di rifare l'accesso")
+            await self._descrivi_pagina(self._pagina)
             raise ErroreUnipol(
                 "Maschera BDA aperta ma campo Targa non trovato. "
-                "Probabile cambio di layout della pagina."
+                "Sopra c'e' la descrizione della pagina."
             )
         _log("maschera di ricerca pronta")
         self._sulla_maschera = True
@@ -514,8 +580,14 @@ class SessioneUnipol:
 
     async def consulta(self, targa: str, ritenta: bool = True) -> dict:
         """
-        Interroga la banca dati per una targa e restituisce gli oggetti del
-        modello. Se la sessione e' scaduta la ricostruisce e riprova una volta.
+        Interroga la banca dati per una targa.
+
+        Due tipi di intoppo, due rimedi diversi:
+          - percorso interrotto -> si torna su Leonardo e si rifanno i menu,
+            senza toccare l'accesso, che e' ancora buono
+          - accesso scaduto     -> si rifa' il login da zero
+        Fare il login quando basterebbe rifare i menu costa venticinque
+        secondi e, se qualcun altro e' collegato, lo scollega.
         """
         targa = (targa or "").replace(" ", "").replace("-", "").upper()
         if not re.fullmatch(r"[A-Z0-9]{5,10}", targa):
@@ -524,9 +596,27 @@ class SessioneUnipol:
         async with self._lock:
             try:
                 return await self._consulta_interna(targa)
+
+            except PercorsoInterrotto as e:
+                if not ritenta:
+                    raise
+                _log(f"{e}")
+                _log("rifaccio il percorso dai menu, senza rifare l'accesso")
+                await self._chiudi_segnalazione()
+                self._sulla_maschera = False
+                try:
+                    await self._vai_alla_maschera()
+                    return await self._consulta_interna(targa)
+                except (PercorsoInterrotto, SessioneScaduta):
+                    _log("non e' bastato: rifaccio l'accesso da zero")
+                    await self.chiudi()
+                    await self.avvia()
+                    return await self._consulta_interna(targa)
+
             except SessioneScaduta:
                 if not ritenta:
                     raise
+                _log("accesso scaduto, rifaccio il login")
                 await self.chiudi()
                 await self.avvia()
                 return await self._consulta_interna(targa)
@@ -568,8 +658,14 @@ class SessioneUnipol:
         await page.wait_for_load_state("domcontentloaded", timeout=30_000)
         await page.wait_for_timeout(2_000)
 
-        if await self._pagina_in_errore():
-            raise SessioneScaduta("Il portale ha risposto con un errore di sessione")
+        tipo_errore = await self._pagina_in_errore()
+        if tipo_errore == "percorso":
+            await self._chiudi_segnalazione()
+            raise PercorsoInterrotto(
+                "La sessione di lavoro si e' interrotta durante la ricerca."
+            )
+        if tipo_errore == "login":
+            raise SessioneScaduta("Il portale chiede di rifare l'accesso")
 
         # --- PAGINA 1: dati bda (paginaD0) --------------------------------
         # Contiene i dati tecnici del veicolo: telaio, omologazione,
