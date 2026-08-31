@@ -359,7 +359,7 @@ class SessioneUnipol:
             "mandami uno screenshot."
         )
 
-    async def _quale_schermata(self, pagina: Page) -> str:
+    async def _quale_schermata(self, pagina: Page, silenzioso: bool = False) -> str:
         """
         Riconosce a quale delle tre schermate di accesso siamo.
 
@@ -421,7 +421,8 @@ class SessioneUnipol:
         except Exception:
             pass
 
-        await self._descrivi_pagina(pagina)
+        if not silenzioso:
+            await self._descrivi_pagina(pagina)
         return "sconosciuta"
 
     async def _descrivi_pagina(self, pagina: Page) -> None:
@@ -461,6 +462,24 @@ class SessioneUnipol:
         _log(f"  campi  : {' | '.join(campi) if campi else 'nessuno'}")
         _log("--- fine descrizione ---")
 
+    async def _prova_leonardo(self) -> bool:
+        """
+        Va su Leonardo e verifica di essere dentro.
+
+        Dopo l'OTP il portale atterra su /my-policy, che risponde 404: la
+        sessione e' valida lato server ma la pagina di arrivo non esiste.
+        Aspettare di "vedere il portale" su quella pagina e' inutile, bisogna
+        andarci direttamente. Nella prima versione del bot questo passaggio
+        c'era gia', chiamato "forzatura URL Leonardo".
+        """
+        page = self._pagina
+        try:
+            await page.goto(LEONARDO_URL, wait_until="domcontentloaded", timeout=25_000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(3_000)
+        return await self._sessione_valida(page)
+
     async def _completa_mfa(self) -> None:
         """
         Attraversa le schermate fra le credenziali e l'ingresso nel portale.
@@ -470,26 +489,25 @@ class SessioneUnipol:
         """
         page = self._pagina
         otp_inserito = False
+        descritto = False
 
-        for tentativo in range(40):
+        for tentativo in range(30):
             await page.wait_for_timeout(1_000)
-            schermata = await self._quale_schermata(page)
+            schermata = await self._quale_schermata(page, silenzioso=descritto)
 
             if schermata == "dentro":
                 _log("2/6 accesso completato")
                 return
 
             if schermata == "otp":
-                if otp_inserito:
-                    continue          # gia' inviato, si aspetta il passaggio
-                await self._inserisci_otp()
-                otp_inserito = True
+                if not otp_inserito:
+                    await self._inserisci_otp()
+                    otp_inserito = True
+                    _log("2/6 codice inviato, attendo la registrazione della sessione")
+                    await asyncio.sleep(6)
                 continue
 
             if schermata in ("mfa", "intermedia"):
-                # Sulla schermata Microsoft MFA il campo va lasciato vuoto:
-                # scrivendoci dentro si chiede la notifica sul telefono, che
-                # nessuno puo' approvare da qui.
                 if schermata == "mfa" and tentativo == 0:
                     _log("2/6 schermata Microsoft MFA, proseguo senza compilare")
                 try:
@@ -510,8 +528,23 @@ class SessioneUnipol:
                     "utente, password o dominio non accettati."
                 )
 
+            # Pagina senza contenuti utili. Se l'OTP e' gia' stato inviato e'
+            # la 404 di /my-policy: la sessione c'e', basta andare su Leonardo.
+            if schermata == "sconosciuta":
+                descritto = True
+                if otp_inserito:
+                    _log("2/6 pagina di arrivo inesistente (404), vado diretto su Leonardo")
+                    if await self._prova_leonardo():
+                        _log("2/6 accesso completato")
+                        return
+
+        # Ultimo tentativo prima di arrendersi.
+        if await self._prova_leonardo():
+            _log("2/6 accesso completato")
+            return
+
         raise ErroreUnipol(
-            "Login non completato: la schermata del codice non e' comparsa. "
+            "Login non completato: dopo il codice non si arriva a Leonardo. "
             "Se entrando a mano il portale chiede passaggi diversi, segnalamelo."
         )
 
