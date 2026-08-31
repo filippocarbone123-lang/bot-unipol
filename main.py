@@ -796,7 +796,7 @@ async def debug_login():
         raise HTTPException(503, f"Motore BDA non disponibile: {ERRORE_BDA}")
 
     from playwright.async_api import async_playwright
-    from unipol_sessione import ARGS_CHROMIUM, LOGIN_URL, USER_AGENT
+    from unipol_sessione import ARGS_CHROMIUM, LOGIN_ALTERNATIVI, LOGIN_URL, USER_AGENT
 
     async with bot_semaphore:
         async with async_playwright() as p:
@@ -804,9 +804,27 @@ async def debug_login():
             contesto = await browser.new_context(user_agent=USER_AGENT, locale="it-IT")
             page = await contesto.new_page()
             try:
-                risposta = await page.goto(LOGIN_URL, wait_until="domcontentloaded",
-                                           timeout=40_000)
-                await page.wait_for_timeout(3_000)
+                esiti = []
+                risposta = None
+                for indirizzo in [LOGIN_URL] + [u for u in LOGIN_ALTERNATIVI if u != LOGIN_URL]:
+                    try:
+                        risposta = await page.goto(indirizzo, wait_until="domcontentloaded",
+                                                   timeout=30_000)
+                        await page.wait_for_timeout(2_000)
+                        trovata = await page.locator(
+                            'input[name="Username" i], input[name="username" i]').first.count()
+                        esiti.append({
+                            "indirizzo": indirizzo,
+                            "codice_http": risposta.status if risposta else None,
+                            "indirizzo_finale": page.url,
+                            "maschera_di_accesso": bool(trovata),
+                        })
+                        if trovata:
+                            break
+                    except Exception as e:
+                        esiti.append({"indirizzo": indirizzo,
+                                      "errore": f"{type(e).__name__}: {str(e)[:120]}"})
+                await page.wait_for_timeout(1_000)
                 testo = await page.inner_text("body", timeout=8_000)
                 campi = await page.evaluate("""() =>
                     Array.from(document.querySelectorAll('input, select, button'))
@@ -820,7 +838,7 @@ async def debug_login():
                          }))
                 """)
                 return {
-                    "indirizzo_richiesto": LOGIN_URL,
+                    "indirizzi_provati": esiti,
                     "indirizzo_finale": page.url,
                     "codice_http": risposta.status if risposta else None,
                     "titolo": await page.title(),

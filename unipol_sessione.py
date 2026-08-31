@@ -54,7 +54,22 @@ UNIPOL_TOTP_SECRET = (os.getenv("UNIPOL_TOTP_SECRET") or "").replace(" ", "").st
 UNIPOL_DOMINIO = os.getenv("UNIPOL_DOMINIO", "Uniage")
 
 BASE_URL = os.getenv("UNIPOL_BASE_URL", "https://essig.unipolsai.it")
-LOGIN_URL = f"{BASE_URL}/my-policy"
+
+# Indirizzo della pagina di accesso.
+#
+# E' "my.policy" con il PUNTO, non "my-policy" col trattino: si legge nella
+# barra degli indirizzi del video del login, ed e' il nome standard della
+# pagina di accesso dei sistemi F5, quelli davanti al portale Unipol. Con il
+# trattino il server risponde "404 Not Found - IBM_HTTP_Server".
+LOGIN_URL = os.getenv("UNIPOL_LOGIN_URL", f"{BASE_URL}/my.policy")
+
+# Se la maschera non compare, si provano questi altri indirizzi: chiedendo una
+# pagina protetta, il sistema di accesso reindirizza da solo alla sua maschera.
+LOGIN_ALTERNATIVI = [
+    f"{BASE_URL}/my.policy",
+    f"{BASE_URL}/",
+    f"{BASE_URL}/my-policy",
+]
 
 # La pagina che hai segnalato. Il bot la prova per prima: se il server
 # risponde con la maschera, risparmia la navigazione a menu; se risponde con
@@ -224,6 +239,42 @@ class SessioneUnipol:
 
     # -- login --------------------------------------------------------------
 
+    async def _apri_maschera_login(self):
+        """
+        Apre la pagina di accesso e restituisce il campo Utente.
+
+        Prova gli indirizzi noti finche' la maschera non compare. Se nessuno
+        funziona, descrive nei log cosa ha trovato invece di lasciare un
+        timeout muto: un errore che dice solo "campo non trovato" costringe a
+        indovinare, e ci abbiamo gia' perso una serata.
+        """
+        page = self._pagina
+        selettore = 'input[name="Username" i], input[name="username" i]'
+
+        indirizzi = [LOGIN_URL] + [u for u in LOGIN_ALTERNATIVI if u != LOGIN_URL]
+        for indirizzo in indirizzi:
+            try:
+                await page.goto(indirizzo, wait_until="domcontentloaded", timeout=30_000)
+            except Exception as e:
+                _log(f"  {indirizzo} non raggiungibile ({type(e).__name__})")
+                continue
+            await page.wait_for_timeout(2_000)
+
+            campo = page.locator(selettore).first
+            try:
+                await campo.wait_for(state="visible", timeout=8_000)
+                if indirizzo != LOGIN_URL:
+                    _log(f"  maschera trovata su {indirizzo}")
+                return campo
+            except Exception:
+                _log(f"  nessuna maschera su {indirizzo}")
+
+        await self._descrivi_pagina(page)
+        raise ErroreUnipol(
+            "Maschera di accesso non trovata su nessuno degli indirizzi noti. "
+            "Sopra c'e' la descrizione dell'ultima pagina vista."
+        )
+
     async def _login(self) -> None:
         """
         Sequenza di accesso identica a quella del bot originale.
@@ -246,10 +297,7 @@ class SessioneUnipol:
         page = self._pagina
 
         _log("1/4 inserimento utente e password")
-        await page.goto(LOGIN_URL, wait_until="commit", timeout=40_000)
-
-        campo_user = page.locator('input[name="Username" i], input[name="username" i]').first
-        await campo_user.wait_for(state="visible", timeout=20_000)
+        campo_user = await self._apri_maschera_login()
         await campo_user.fill(UNIPOL_USER)
 
         await page.locator('input[type="password"]').first.fill(UNIPOL_PASS)
