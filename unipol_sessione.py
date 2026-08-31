@@ -299,8 +299,14 @@ class SessioneUnipol:
 
         page = self._pagina
         _log("1/6 apertura pagina di login")
-        await page.goto(LOGIN_URL, wait_until="commit", timeout=40_000)
-        await page.wait_for_timeout(2_000)
+        # 'domcontentloaded' invece di 'commit': con 'commit' la navigazione
+        # e' considerata finita appena arriva la prima risposta, quindi il
+        # corpo della pagina puo' non esistere ancora e ogni lettura fallisce.
+        try:
+            await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=40_000)
+        except Exception as e:
+            _log(f"1/6 caricamento lento ({type(e).__name__}), proseguo")
+        await page.wait_for_timeout(3_000)
 
         for tentativo in range(2):
             schermata = await self._quale_schermata(page)
@@ -341,8 +347,11 @@ class SessioneUnipol:
             if tentativo == 0:
                 _log("1/6 pagina di accesso non riconosciuta, azzero la sessione e riparto")
                 await self._pulisci_sessione()
-                await page.goto(LOGIN_URL, wait_until="commit", timeout=40_000)
-                await page.wait_for_timeout(2_500)
+                try:
+                    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=40_000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(3_000)
 
         raise ErroreUnipol(
             "Pagina di accesso non riconosciuta nemmeno dopo aver azzerato la "
@@ -394,12 +403,63 @@ class SessioneUnipol:
         if re.search(r"Sistema di autenticazione", testa, re.I):
             return "credenziali"
 
+        # Ripiego: utente e password insieme sono comunque una maschera di
+        # accesso, anche se il testo della pagina fosse diverso dal previsto.
+        try:
+            ha_utente = await pagina.locator(
+                'input[name="Username" i], input[name="username" i], '
+                'input[id*="user" i]').first.count()
+            ha_password = await pagina.locator('input[type="password"]').first.count()
+            if ha_utente and ha_password:
+                return "credenziali"
+        except Exception:
+            pass
+
         try:
             if await pagina.locator('input[type="submit"], button').first.is_visible(timeout=1_500):
                 return "intermedia"
         except Exception:
             pass
+
+        await self._descrivi_pagina(pagina)
         return "sconosciuta"
+
+    async def _descrivi_pagina(self, pagina: Page) -> None:
+        """
+        Scrive nei log cosa c'e' davvero sulla pagina non riconosciuta.
+
+        Senza questo, ogni tentativo di correzione e' un'ipotesi: si vede solo
+        che il riconoscimento fallisce, non cosa il portale stia mostrando.
+        """
+        try:
+            url = pagina.url
+        except Exception:
+            url = "?"
+        try:
+            titolo = await pagina.title()
+        except Exception:
+            titolo = "?"
+        try:
+            testo = (await pagina.inner_text("body", timeout=5_000))[:400]
+            testo = re.sub(r"\s+", " ", testo).strip()
+        except Exception as e:
+            testo = f"(corpo non leggibile: {type(e).__name__})"
+        try:
+            campi = await pagina.evaluate("""() =>
+                Array.from(document.querySelectorAll('input, select, button'))
+                     .slice(0, 25)
+                     .map(e => `${e.tagName.toLowerCase()}[type=${e.type||'-'}]`
+                               + `[name=${e.name||'-'}][id=${e.id||'-'}]`)
+            """)
+        except Exception:
+            campi = []
+
+        _log("--- PAGINA NON RICONOSCIUTA ---")
+        _log(f"  url    : {url}")
+        _log(f"  titolo : {titolo}")
+        _log(f"  testo  : {testo}")
+        _log(f"  campi  : {' | '.join(campi) if campi else 'nessuno'}")
+        _log("--- fine descrizione ---")
 
     async def _completa_mfa(self) -> None:
         """

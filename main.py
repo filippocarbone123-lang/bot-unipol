@@ -780,6 +780,63 @@ async def consulta_lotto(payload: dict):
     }
 
 
+@app.get("/debug/login")
+async def debug_login():
+    """
+    Apre la pagina di accesso Unipol e riferisce esattamente cosa contiene.
+
+    Serve a smettere di tirare a indovinare quando il login non va: mostra
+    indirizzo, titolo, testo e nomi dei campi della pagina che il bot trova
+    davvero, che possono essere diversi da quelli che vedi tu dal tuo browser
+    (indirizzo IP diverso, nessun cookie, lingua diversa).
+
+        https://bot-unipol.onrender.com/debug/login
+    """
+    if not MOTORE_BDA_ATTIVO:
+        raise HTTPException(503, f"Motore BDA non disponibile: {ERRORE_BDA}")
+
+    from playwright.async_api import async_playwright
+    from unipol_sessione import ARGS_CHROMIUM, LOGIN_URL, USER_AGENT
+
+    async with bot_semaphore:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=ARGS_CHROMIUM)
+            contesto = await browser.new_context(user_agent=USER_AGENT, locale="it-IT")
+            page = await contesto.new_page()
+            try:
+                risposta = await page.goto(LOGIN_URL, wait_until="domcontentloaded",
+                                           timeout=40_000)
+                await page.wait_for_timeout(3_000)
+                testo = await page.inner_text("body", timeout=8_000)
+                campi = await page.evaluate("""() =>
+                    Array.from(document.querySelectorAll('input, select, button'))
+                         .slice(0, 30)
+                         .map(e => ({
+                             tag: e.tagName.toLowerCase(),
+                             type: e.type || null,
+                             name: e.name || null,
+                             id: e.id || null,
+                             value: e.tagName.toLowerCase() === 'button' ? e.innerText : (e.value || null)
+                         }))
+                """)
+                return {
+                    "indirizzo_richiesto": LOGIN_URL,
+                    "indirizzo_finale": page.url,
+                    "codice_http": risposta.status if risposta else None,
+                    "titolo": await page.title(),
+                    "testo_pagina": re.sub(r"\s+", " ", testo)[:1500],
+                    "campi_presenti": campi,
+                }
+            except Exception as e:
+                return {
+                    "errore": f"{type(e).__name__}: {str(e)[:400]}",
+                    "indirizzo_finale": page.url,
+                }
+            finally:
+                await contesto.close()
+                await browser.close()
+
+
 @app.get("/stato")
 async def stato():
     """Pagina di controllo: dice cosa e' acceso e cosa no."""
