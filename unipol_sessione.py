@@ -29,7 +29,6 @@ import asyncio
 import os
 import re
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional
 
 import pyotp
@@ -83,10 +82,6 @@ PERCORSO_MENU = [
 
 # Dopo quanto tempo di inattivita' consideriamo la sessione da rinfrescare.
 MINUTI_VITA_SESSIONE = int(os.getenv("UNIPOL_MINUTI_SESSIONE", "20"))
-
-# Lo stato del browser (cookie) viene salvato qui: se il processo riparte
-# entro la finestra di validita', non serve rifare login e OTP.
-FILE_STATO = Path(os.getenv("UNIPOL_FILE_STATO", "/tmp/unipol_stato.json"))
 
 # Frasi che indicano "sessione persa" o "accesso negato".
 _SEGNALI_SESSIONE_PERSA = re.compile(
@@ -162,21 +157,12 @@ class SessioneUnipol:
         """
         Apre il browser, fa login e si porta sulla maschera BDA.
 
-        Se durante il percorso emerge che la sessione riusata era scaduta, si
-        ricomincia una volta sola con un login pulito: e' il caso tipico del
-        servizio riacceso dopo ore, con i cookie sul disco ormai vecchi.
+        Viene chiamata una volta sola: le targhe successive riusano la stessa
+        sessione senza rifare login e OTP.
         """
         await self._apri_browser()
-        try:
-            await self._login()
-            await self._vai_alla_maschera()
-        except SessioneScaduta as e:
-            _log(f"{e} — riparto con un login pulito")
-            await self._pulisci_sessione()
-            await self.chiudi()
-            await self._apri_browser()
-            await self._login()
-            await self._vai_alla_maschera()
+        await self._login()
+        await self._vai_alla_maschera()
         self._ultimo_uso = datetime.now()
 
     async def chiudi(self) -> None:
@@ -198,10 +184,11 @@ class SessioneUnipol:
             headless=self.headless, args=ARGS_CHROMIUM
         )
 
-        stato = str(FILE_STATO) if FILE_STATO.exists() else None
-        self._contesto = await self._browser.new_context(
-            user_agent=USER_AGENT, storage_state=stato
-        )
+        # Nessun riuso dei cookie fra un riavvio e l'altro: si e' rivelato
+        # una fonte di problemi (il portale mostrava schermate a meta'
+        # autenticazione) senza vantaggi reali. La sessione si riusa fra una
+        # targa e l'altra tenendo aperto il browser, che e' un'altra cosa.
+        self._contesto = await self._browser.new_context(user_agent=USER_AGENT)
         self._pagina = await self._contesto.new_page()
 
         # Immagini e font non servono e costano banda e RAM: li blocchiamo.
@@ -210,86 +197,20 @@ class SessioneUnipol:
             lambda rotta: asyncio.ensure_future(rotta.abort()),
         )
 
-    async def _salva_stato(self) -> None:
-        try:
-            FILE_STATO.parent.mkdir(parents=True, exist_ok=True)
-            await self._contesto.storage_state(path=str(FILE_STATO))
-        except Exception:
-            pass   # il salvataggio dei cookie e' un'ottimizzazione, non un obbligo
-
     # -- login --------------------------------------------------------------
-
-    async def _sessione_valida(self, pagina: Page) -> bool:
-        """
-        Verifica di essere davvero autenticati.
-
-        Il controllo cerca gli elementi della barra di Leonardo, che esistono
-        solo dopo il login. Il controllo precedente era all'incontrario ("se
-        non vedo il campo Username allora sono dentro") ed e' proprio quello
-        che ha fatto fallire l'estrazione: non vedere la maschera di login puo'
-        voler dire tutt'altro, una pagina di errore o un reindirizzamento.
-        L'assenza di una prova non e' una prova.
-        """
-        try:
-            testo = await pagina.inner_text("body", timeout=8_000)
-        except Exception:
-            return False
-        if re.search(r"Username|Password|verification code", testo[:3_000], re.I):
-            return False
-        return bool(re.search(r"\bStrumenti\b|\bAgenda\b|Clienti e scadenze",
-                              testo[:6_000], re.I))
-
-    def _dimentica_cookie(self) -> None:
-        """Cancella lo stato salvato: era scaduto e ha portato fuori strada."""
-        try:
-            if FILE_STATO.exists():
-                FILE_STATO.unlink()
-                _log("cookie salvati scaduti, buttati via")
-        except Exception:
-            pass
-
-    async def _compila_credenziali(self) -> None:
-        """Riempie utente, password e dominio sulla prima schermata."""
-        page = self._pagina
-        campo_user = page.locator('input[name="Username" i], input[name="username" i]').first
-        await campo_user.wait_for(state="visible", timeout=20_000)
-        await campo_user.fill(UNIPOL_USER)
-        await page.locator('input[type="password"]').first.fill(UNIPOL_PASS)
-
-        dominio = page.locator('select[name="domain" i]').first
-        if await dominio.count() and await dominio.is_visible():
-            try:
-                await dominio.select_option(label=UNIPOL_DOMINIO, timeout=3_000)
-            except Exception:
-                await dominio.select_option(value=UNIPOL_DOMINIO, timeout=3_000)
-
-        _log("1/6 utente, password e dominio inviati")
-        await page.locator('input[type="submit"], button').first.click()
-
-    async def _pulisci_sessione(self) -> None:
-        """
-        Cancella i cookie sul disco E quelli gia' caricati nel browser.
-
-        Cancellare solo il file non basta: i cookie erano gia' stati messi nel
-        contesto quando il browser e' partito, quindi il portale continuava a
-        vederci come mezzo autenticati e ci mandava a una schermata avanzata
-        invece della maschera di login.
-        """
-        self._dimentica_cookie()
-        try:
-            await self._contesto.clear_cookies()
-            _log("cookie della sessione azzerati anche nel browser")
-        except Exception:
-            pass
 
     async def _login(self) -> None:
         """
-        Porta la sessione dentro al portale, da qualunque punto si parta.
+        Sequenza di accesso identica a quella del bot originale.
 
-        Non si pretende di trovare una schermata precisa: si guarda dove si e'
-        arrivati e si riprende da li'. Con i cookie salvati si puo' atterrare
-        gia' dentro, oppure a meta' autenticazione, oppure sulla maschera di
-        login: tutti e tre i casi sono normali e vanno gestiti.
+        Non c'e' riconoscimento di schermate ne' verifiche intermedie: si
+        compilano le credenziali, si preme il pulsante della schermata MFA, si
+        scrive il codice e si forza l'URL di Leonardo. Il portale, dopo il
+        codice, atterra su una pagina 404: la "forzatura" e' il modo di
+        aggirarla, ed e' il motivo per cui questa sequenza funziona.
+
+        Ogni tentativo di renderla piu' furba ha peggiorato le cose. Se un
+        giorno il portale cambiasse davvero, meglio partire da qui.
         """
         if not (UNIPOL_USER and UNIPOL_PASS and UNIPOL_TOTP_SECRET):
             raise ErroreUnipol(
@@ -298,132 +219,59 @@ class SessioneUnipol:
             )
 
         page = self._pagina
-        _log("1/6 apertura pagina di login")
-        # 'domcontentloaded' invece di 'commit': con 'commit' la navigazione
-        # e' considerata finita appena arriva la prima risposta, quindi il
-        # corpo della pagina puo' non esistere ancora e ogni lettura fallisce.
+
+        _log("1/4 inserimento utente e password")
+        await page.goto(LOGIN_URL, wait_until="commit", timeout=40_000)
+
+        campo_user = page.locator('input[name="Username" i], input[name="username" i]').first
+        await campo_user.wait_for(state="visible", timeout=20_000)
+        await campo_user.fill(UNIPOL_USER)
+
+        await page.locator('input[type="password"]').first.fill(UNIPOL_PASS)
+
+        dominio = page.locator('select[name="domain" i]').first
+        if await dominio.is_visible():
+            try:
+                await dominio.select_option(label=UNIPOL_DOMINIO, timeout=3_000)
+            except Exception:
+                await dominio.select_option(value=UNIPOL_DOMINIO, timeout=3_000)
+
+        await page.locator('input[type="submit"], button').first.click()
+
+        _log("2/4 schermata intermedia MFA")
+        bottone_mfa = page.locator('input[type="submit"], button').first
+        await bottone_mfa.wait_for(state="visible", timeout=25_000)
+        await bottone_mfa.click()
+
+        _log("3/4 inserimento codice OTP")
+        campo_codice = page.locator(
+            'input[type="text"], input[type="number"], input').first
+        await campo_codice.wait_for(state="visible", timeout=25_000)
+
+        totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
+        codice = totp.now()
+        if codice == self.ultimo_otp:
+            # Un codice vale 30 secondi e non e' riutilizzabile: se e' lo
+            # stesso di poco fa si aspetta la finestra successiva.
+            attesa = 30 - (int(datetime.now().timestamp()) % 30) + 1
+            _log(f"stesso codice di poco fa, attendo {attesa}s")
+            await asyncio.sleep(attesa)
+            codice = totp.now()
+        self.ultimo_otp = codice
+
+        await campo_codice.fill("")
+        await campo_codice.type(codice, delay=100)
+        await page.locator('input[type="submit"], button').first.click()
+
+        _log("attesa 6s per la registrazione della sessione")
+        await asyncio.sleep(6)
+
+        _log("4/4 forzatura URL Leonardo")
         try:
-            await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=40_000)
+            await page.goto(LEONARDO_URL, wait_until="commit", timeout=20_000)
         except Exception as e:
-            _log(f"1/6 caricamento lento ({type(e).__name__}), proseguo")
-        await page.wait_for_timeout(3_000)
-
-        for tentativo in range(2):
-            schermata = await self._quale_schermata(page)
-
-            # Gia' dentro secondo la pagina: si verifica su Leonardo, perche'
-            # una pagina generica puo' somigliare al portale senza esserlo.
-            if schermata == "dentro":
-                try:
-                    await page.goto(LEONARDO_URL, wait_until="domcontentloaded", timeout=25_000)
-                    await page.wait_for_timeout(2_500)
-                except Exception:
-                    pass
-                if await self._sessione_valida(page):
-                    _log("1/6 sessione precedente ancora valida, login non necessario")
-                    await self._salva_stato()
-                    return
-                schermata = "sconosciuta"
-
-            # A meta' autenticazione: si completa senza ripartire da capo.
-            if schermata in ("otp", "mfa", "intermedia"):
-                _log("1/6 autenticazione gia' avviata, la completo")
-                await self._completa_mfa()
-                await asyncio.sleep(6)
-                await self._salva_stato()
-                _log("3/6 login completato")
-                return
-
-            if schermata == "credenziali":
-                await self._compila_credenziali()
-                await self._completa_mfa()
-                await asyncio.sleep(6)
-                await self._salva_stato()
-                _log("3/6 login completato")
-                return
-
-            # Pagina non riconoscibile: quasi sempre e' colpa dei cookie
-            # vecchi. Si azzerano e si riparte una volta sola.
-            if tentativo == 0:
-                _log("1/6 pagina di accesso non riconosciuta, azzero la sessione e riparto")
-                await self._pulisci_sessione()
-                try:
-                    await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=40_000)
-                except Exception:
-                    pass
-                await page.wait_for_timeout(3_000)
-
-        raise ErroreUnipol(
-            "Pagina di accesso non riconosciuta nemmeno dopo aver azzerato la "
-            "sessione. Se entrando a mano vedi qualcosa di diverso dal solito, "
-            "mandami uno screenshot."
-        )
-
-    async def _quale_schermata(self, pagina: Page, silenzioso: bool = False) -> str:
-        """
-        Riconosce a quale delle tre schermate di accesso siamo.
-
-        Il portale ne mette tre in fila:
-          1. "Sistema di autenticazione Unipol" - utente, password, dominio
-          2. "Autenticazione sistemi Unipol"    - Microsoft MFA: si lascia il
-             campo VUOTO e si preme Logon
-          3. "Enter Your Microsoft verification code" - qui va il codice TOTP
-
-        La seconda contiene un campo di tipo password pur non essendo la
-        maschera delle credenziali. Riconoscerla dal tipo di campo, come
-        facevo prima, portava a dichiarare "credenziali rifiutate" mentre le
-        credenziali erano giuste. Si distingue dal testo, non dai campi.
-        """
-        try:
-            testo = await pagina.inner_text("body", timeout=6_000)
-        except Exception:
-            return "sconosciuta"
-
-        testa = testo[:6_000]
-
-        # 3. Schermata del codice.
-        if re.search(r"verification code|codice di verifica", testa, re.I):
-            return "otp"
-
-        # Dentro al portale.
-        if re.search(r"\bStrumenti\b|\bAgenda\b|Clienti e scadenze", testa, re.I):
-            return "dentro"
-
-        # 2. Schermata Microsoft MFA: campo da lasciare vuoto.
-        if re.search(r"Microsoft MFA|Autenticazione sistemi", testa, re.I):
-            return "mfa"
-
-        # 1. Maschera delle credenziali: la riconosce il menu a tendina
-        # Dominio, che sulle altre due schermate non esiste.
-        try:
-            if await pagina.locator('select[name="domain" i]').first.count():
-                return "credenziali"
-        except Exception:
-            pass
-        if re.search(r"Sistema di autenticazione", testa, re.I):
-            return "credenziali"
-
-        # Ripiego: utente e password insieme sono comunque una maschera di
-        # accesso, anche se il testo della pagina fosse diverso dal previsto.
-        try:
-            ha_utente = await pagina.locator(
-                'input[name="Username" i], input[name="username" i], '
-                'input[id*="user" i]').first.count()
-            ha_password = await pagina.locator('input[type="password"]').first.count()
-            if ha_utente and ha_password:
-                return "credenziali"
-        except Exception:
-            pass
-
-        try:
-            if await pagina.locator('input[type="submit"], button').first.is_visible(timeout=1_500):
-                return "intermedia"
-        except Exception:
-            pass
-
-        if not silenzioso:
-            await self._descrivi_pagina(pagina)
-        return "sconosciuta"
+            _log(f"interferenza di rete ({type(e).__name__}), proseguo")
+        await page.wait_for_timeout(4_000)
 
     async def _descrivi_pagina(self, pagina: Page) -> None:
         """
@@ -461,145 +309,6 @@ class SessioneUnipol:
         _log(f"  testo  : {testo}")
         _log(f"  campi  : {' | '.join(campi) if campi else 'nessuno'}")
         _log("--- fine descrizione ---")
-
-    async def _prova_leonardo(self) -> bool:
-        """
-        Va su Leonardo e verifica di essere dentro.
-
-        Dopo l'OTP il portale atterra su /my-policy, che risponde 404: la
-        sessione e' valida lato server ma la pagina di arrivo non esiste.
-        Aspettare di "vedere il portale" su quella pagina e' inutile, bisogna
-        andarci direttamente. Nella prima versione del bot questo passaggio
-        c'era gia', chiamato "forzatura URL Leonardo".
-        """
-        page = self._pagina
-        try:
-            await page.goto(LEONARDO_URL, wait_until="domcontentloaded", timeout=25_000)
-        except Exception:
-            pass
-        await page.wait_for_timeout(3_000)
-        return await self._sessione_valida(page)
-
-    async def _completa_mfa(self) -> None:
-        """
-        Attraversa le schermate fra le credenziali e l'ingresso nel portale.
-
-        A ogni giro guarda dove siamo e fa la mossa giusta, invece di
-        presumere quante schermate ci siano e quanto ci mettano.
-        """
-        page = self._pagina
-        otp_inserito = False
-        descritto = False
-
-        for tentativo in range(30):
-            await page.wait_for_timeout(1_000)
-            schermata = await self._quale_schermata(page, silenzioso=descritto)
-
-            if schermata == "dentro":
-                _log("2/6 accesso completato")
-                return
-
-            if schermata == "otp":
-                if not otp_inserito:
-                    await self._inserisci_otp()
-                    otp_inserito = True
-                    _log("2/6 codice inviato, attendo la registrazione della sessione")
-                    await asyncio.sleep(6)
-                continue
-
-            if schermata in ("mfa", "intermedia"):
-                if schermata == "mfa" and tentativo == 0:
-                    _log("2/6 schermata Microsoft MFA, proseguo senza compilare")
-                try:
-                    for selettore in ('input[value*="Logon" i]', 'input[type="submit"]',
-                                      'button[type="submit"]', 'button'):
-                        bottone = page.locator(selettore).first
-                        if await bottone.count() and await bottone.is_visible(timeout=1_200):
-                            await bottone.click(force=True)
-                            break
-                    await page.wait_for_load_state("domcontentloaded", timeout=15_000)
-                except Exception:
-                    pass
-                continue
-
-            if schermata == "credenziali" and tentativo > 4:
-                raise ErroreUnipol(
-                    "Il portale resta sulla maschera delle credenziali: "
-                    "utente, password o dominio non accettati."
-                )
-
-            # Pagina senza contenuti utili. Se l'OTP e' gia' stato inviato e'
-            # la 404 di /my-policy: la sessione c'e', basta andare su Leonardo.
-            if schermata == "sconosciuta":
-                descritto = True
-                if otp_inserito:
-                    _log("2/6 pagina di arrivo inesistente (404), vado diretto su Leonardo")
-                    if await self._prova_leonardo():
-                        _log("2/6 accesso completato")
-                        return
-
-        # Ultimo tentativo prima di arrendersi.
-        if await self._prova_leonardo():
-            _log("2/6 accesso completato")
-            return
-
-        raise ErroreUnipol(
-            "Login non completato: dopo il codice non si arriva a Leonardo. "
-            "Se entrando a mano il portale chiede passaggi diversi, segnalamelo."
-        )
-
-    async def _inserisci_otp(self) -> None:
-        """
-        Inserisce il codice TOTP a 6 cifre.
-
-        Un codice vale 30 secondi e Unipol non accetta due volte lo stesso: se
-        abbiamo appena usato questo, si aspetta la finestra successiva invece
-        di farsi rifiutare.
-        """
-        page = self._pagina
-
-        campo = None
-        for selettore in ('input[type="text"]:not([disabled])',
-                          'input[type="password"]:not([disabled])',
-                          'input[type="number"]:not([disabled])',
-                          'input[type="tel"]',
-                          'input:not([type="hidden"]):not([type="submit"])'):
-            loc = page.locator(selettore).first
-            try:
-                if await loc.count() and await loc.is_editable(timeout=2_000):
-                    campo = loc
-                    break
-            except Exception:
-                continue
-        if campo is None:
-            raise ErroreUnipol("Schermata OTP riconosciuta ma campo non trovato")
-
-        totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
-        codice = totp.now()
-        if codice == self.ultimo_otp:
-            attesa = 30 - (int(datetime.now().timestamp()) % 30) + 1
-            _log(f"stesso codice OTP di poco fa, attendo {attesa}s la finestra nuova")
-            await asyncio.sleep(attesa)
-            codice = totp.now()
-        self.ultimo_otp = codice
-
-        _log("2/6 inserimento codice OTP")
-        await campo.fill("")
-        await campo.type(codice, delay=100)
-
-        for selettore in ('input[type="submit"]', 'button[type="submit"]',
-                          'input[value*="Logon" i]', 'button:has-text("Logon")',
-                          'button'):
-            bottone = page.locator(selettore).first
-            try:
-                if await bottone.count() and await bottone.is_visible(timeout=1_500):
-                    await bottone.click(force=True)
-                    return
-            except Exception:
-                continue
-        await campo.press("Enter")
-
-    # -- navigazione fino alla maschera BDA ---------------------------------
 
     async def _pagina_in_errore(self) -> bool:
         try:
@@ -715,19 +424,12 @@ class SessioneUnipol:
 
         for voce in voci_intermedie:
             if not await self._clic_menu(leonardo, voce):
-                # Prima di dare la colpa al portale, si verifica di essere
-                # ancora autenticati: un menu che non c'e' quasi sempre
-                # significa sessione scaduta, non voce rinominata.
-                if not await self._sessione_valida(leonardo):
-                    await self._pulisci_sessione()
-                    raise SessioneScaduta(
-                        f"Sessione scaduta: la barra di Leonardo non e' "
-                        f"raggiungibile, quindi '{voce}' non poteva esserci."
-                    )
+                await self._descrivi_pagina(leonardo)
                 raise ErroreUnipol(
                     f"Voce di menu '{voce}' non trovata dentro Leonardo. "
                     f"Percorso atteso: {' > '.join(PERCORSO_MENU)}. "
-                    f"Se il portale e' cambiato, correggi UNIPOL_PERCORSO_BDA."
+                    f"Sopra c'e' la descrizione della pagina che il bot ha "
+                    f"davanti."
                 )
             _log(f"5/6 cliccata voce di menu '{voce}'")
             await leonardo.wait_for_timeout(1_200)
