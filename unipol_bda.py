@@ -368,26 +368,40 @@ def _parse_alimentazione(codice: str) -> Optional["Alimentazione"]:
     """
     Traduce il codice alimentazione della Motorizzazione.
 
-    Sulla pagina compare come lettera singola (G = gasolio, B = benzina), non
-    come parola: 'Alimentazione G' significa Diesel.
+    Sulla pagina compare come sigla, non come parola. Le sigle composte vanno
+    controllate PRIMA di quelle singole, altrimenti si sbaglia:
+        G  = gasolio            -> Diesel
+        GP = benzina/GPL        -> GPL      (non "G" seguito da altro)
+        GM = benzina/metano     -> Metano
+        B  = benzina
+        IB = ibrido
+    Cercando "G" per primo, un veicolo GPL verrebbe classificato Diesel.
     """
     from models import Alimentazione as _Alim
 
     c = (codice or "").strip().upper()
     if not c:
         return None
+
+    # Sigle composte, per prime.
+    if c == "GP" or "GPL" in c:
+        return _Alim.GPL
+    if c == "GM" or "METANO" in c:
+        return _Alim.METANO
+    if c in ("IB", "I") or "IBRID" in c:
+        return _Alim.IBRIDA
+    if c in ("EL", "E") or "ELETTR" in c:
+        return _Alim.ELETTRICA
+
+    # Sigle singole.
     if c in ("G", "D") or "GASOLIO" in c or "DIESEL" in c:
         return _Alim.DIESEL
     if c == "B" or "BENZINA" in c:
         return _Alim.BENZINA
-    if c in ("L", "GPL") or "GPL" in c:
+    if c == "L":
         return _Alim.GPL
-    if c == "M" or "METANO" in c:
+    if c == "M":
         return _Alim.METANO
-    if c == "E" or "ELETTR" in c:
-        return _Alim.ELETTRICA
-    if c == "I" or "IBRID" in c:
-        return _Alim.IBRIDA
     return None
 
 
@@ -399,6 +413,7 @@ _CAMPI_VEICOLO = {
     "omologazione": r"Omologazione\s+([A-Z0-9]{4,20})",
     "fabbrica": r"Fabbrica e modello\s+(.+?)(?:\s*\n|\s{2,}Nazionalit)",
     "tipo_veicolo": r"Tipo veicolo\s+([A-Z][A-Z ]{3,40}?)(?:\s*\n|\s{2,}Categoria)",
+    "categoria": r"Categoria\s+([A-Z][A-Z' ]{3,70}?)(?:\s*\n|\s{2,}Uso\b)",
     "uso": r"\bUso\s+([A-Z]+)",
     "cilindrata": r"Cilindrata\s*cc\s+([\d.]+)",
     "cv_fiscali": r"Potenza\s*fis\.?\s*cv\s+(\d+)",
@@ -428,7 +443,10 @@ def parse_pagina_veicolo(testo: str, veicolo: Optional[Veicolo] = None) -> Veico
 
     v.telaio = trovato.get("telaio", v.telaio)
     v.tipo_veicolo = trovato.get("tipo_veicolo", v.tipo_veicolo) or "AUTOVETTURA"
-    v.uso = (trovato.get("uso") or v.uso or "Privato").title()
+    v.categoria = trovato.get("categoria", v.categoria)
+    # Uso e categoria si conservano come li scrive la Motorizzazione, in
+    # maiuscolo: sono voci di un elenco ufficiale, non testo libero.
+    v.uso = trovato.get("uso") or v.uso or "PROPRIO"
 
     # "FIAT AUTO SPA 199BXC1A 05" -> marca FIAT, resto come codice modello.
     fabbrica = trovato.get("fabbrica", "")

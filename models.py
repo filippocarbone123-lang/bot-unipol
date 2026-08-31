@@ -191,6 +191,12 @@ class Veicolo(_Base):
     marca: str = ""
     modello: str = ""
     allestimento: str = ""
+    categoria: str = ""
+    """
+    Categoria della Motorizzazione, es. "AUTOVETTURA PER TRASPORTO DI PERSONE".
+
+    E' piu' precisa di tipo_veicolo, che si ferma a "AUTOVETTURA".
+    """
 
     # Codici di allestimento: sono la chiave per mappare lo stesso veicolo su
     # portali diversi. Nel video del preventivatore Unipol si vedono nel popup

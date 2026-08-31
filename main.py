@@ -66,6 +66,15 @@ try:
 except Exception as _e:
     ERRORE_BDA = f"{type(_e).__name__}: {_e}"
 
+# Quixa e' un complemento: se manca, l'estrazione da Unipol funziona lo stesso.
+QUIXA_ATTIVO = False
+ERRORE_QUIXA = ""
+try:
+    from quixa import consulta_quixa
+    QUIXA_ATTIVO = True
+except Exception as _e:
+    ERRORE_QUIXA = f"{type(_e).__name__}: {_e}"
+
 
 # --- Archivio dei risultati -------------------------------------------------
 #
@@ -230,6 +239,13 @@ ALIAS_COLONNE: dict[str, list[str]] = {
     "email":                 ["cli_email", "Email", "email"],
     "marca":                 ["Marca"],
     "modello":               ["Modello"],
+    "allestimento":          ["Allestimento Veicolo", "Allestimento"],
+    # Attenzione: nella colonna Airtable "Tipo veicolo" ci va la CATEGORIA di
+    # Unipol ("AUTOVETTURA PER TRASPORTO DI PERSONE"), non il campo Unipol
+    # chiamato "Tipo veicolo" ("AUTOVETTURA"), che e' piu' generico.
+    "categoria":             ["Tipo veicolo", "Tipo Veicolo", "Categoria"],
+    "uso_veicolo":           ["Uso Veicolo", "Uso"],
+    "valore_veicolo":        ["Valore Veicolo", "Valore veicolo", "Valore assicurato"],
     "kw":                    ["KW"],
     "cilindrata":            ["Cilindrata"],
     "posti":                 ["Posti"],
@@ -267,7 +283,53 @@ COLONNE_INTOCCABILI = {
 
 _COLONNE_TROVATE: dict[str, str] = {}
 _COLONNE_REALI: list[str] = []
+_TIPI_COLONNE: dict[str, str] = {}
 _ORIGINE_SCHEMA: str = "non ancora letto"
+
+# Tipi che vogliono un valore testuale.
+TIPI_TESTO = {
+    "singleLineText", "multilineText", "richText",
+    "singleSelect", "multipleSelects", "email", "phoneNumber", "url", "barcode",
+}
+# Tipi che vogliono un numero.
+TIPI_NUMERO = {"number", "currency", "percent", "duration", "rating"}
+
+
+def _adatta_valore(colonna: str, valore):
+    """
+    Converte il valore nel formato che la colonna si aspetta.
+
+    Serve perche' colonne concettualmente simili hanno tipi diversi: nella
+    tabella 'Classe CU' e' testo mentre 'Classe CU Provenienza' e' numero.
+    Mandando lo stesso intero a entrambe, la prima lo rifiuta. Il tipo lo dice
+    lo schema, quindi invece di indovinare colonna per colonna si adatta.
+    """
+    if valore is None or valore == "":
+        return valore
+
+    tipo = _TIPI_COLONNE.get(colonna)
+    if tipo is None:
+        return valore              # schema non letto: si manda com'e'
+
+    if tipo in TIPI_TESTO:
+        if isinstance(valore, float) and valore.is_integer():
+            return str(int(valore))
+        return str(valore)
+
+    if tipo in TIPI_NUMERO:
+        if isinstance(valore, (int, float)):
+            return valore
+        pulito = re.sub(r"[^\d.,\-]", "", str(valore)).replace(",", ".")
+        try:
+            numero = float(pulito)
+        except ValueError:
+            return None            # non convertibile: meglio non scrivere
+        return int(numero) if numero.is_integer() else numero
+
+    if tipo == "checkbox":
+        return bool(valore)
+
+    return valore
 
 # Tipi di colonna che Airtable calcola da solo: scriverci dentro e' un errore.
 TIPI_NON_SCRIVIBILI = {
@@ -300,10 +362,13 @@ def _schema_da_metadati() -> list[str]:
         for tabella in res.json().get("tables", []):
             if _chiave(tabella.get("name", "")) != _chiave("Trattative"):
                 continue
-            nomi = [
-                campo["name"] for campo in tabella.get("fields", [])
-                if campo.get("type") not in TIPI_NON_SCRIVIBILI
-            ]
+            nomi = []
+            for campo in tabella.get("fields", []):
+                tipo = campo.get("type")
+                if tipo in TIPI_NON_SCRIVIBILI:
+                    continue
+                nomi.append(campo["name"])
+                _TIPI_COLONNE[campo["name"]] = tipo
             scartate = len(tabella.get("fields", [])) - len(nomi)
             print(f"[BDA] schema completo: {len(nomi)} colonne scrivibili "
                   f"({scartate} calcolate, escluse)", flush=True)
@@ -422,7 +487,10 @@ async def elenco_colonne():
         ),
         "quante_colonne": len(reali),
         "colonne_trovate_in_tabella": sorted(reali),
+        "tipo_di_ogni_colonna": dict(sorted(_TIPI_COLONNE.items())),
         "dove_scrive_ogni_dato": mappa,
+        "tipo_di_ogni_colonna": {c: _TIPI_COLONNE.get(c, "sconosciuto")
+                                 for c in sorted(set(mappa.values()) & reali)},
         "dati_senza_colonna": mancanti,
         "colonne_protette_mai_scritte": sorted(
             c for c in reali if _chiave(c) in COLONNE_INTOCCABILI
@@ -433,8 +501,8 @@ async def elenco_colonne():
 @app.post("/airtable/ricarica-colonne")
 async def ricarica_colonne():
     """Da usare dopo aver creato colonne nuove, per farle riconoscere subito."""
-    global _COLONNE_TROVATE, _COLONNE_REALI
-    _COLONNE_TROVATE, _COLONNE_REALI = {}, []
+    global _COLONNE_TROVATE, _COLONNE_REALI, _TIPI_COLONNE
+    _COLONNE_TROVATE, _COLONNE_REALI, _TIPI_COLONNE = {}, [], {}
     return {"stato": "riconoscimento azzerato", "colonne": len(_colonne_della_tabella())}
 
 
@@ -442,6 +510,16 @@ def _campi_airtable(dati: dict) -> dict:
     """Traduce il risultato della banca dati nelle colonne reali della tabella."""
     p, v, c = dati["posizione"], dati["veicolo"], dati["contraente"]
     col = _mappa_colonne()
+    quixa = dati.get("quixa") or {}
+
+    # Marca e modello: vince Quixa quando ha risposto.
+    #
+    # Unipol restituisce il veicolo come lo registra la Motorizzazione, cioe'
+    # "FIAT AUTO SPA 199BXC1A 05" o "KIA" e basta. Quixa restituisce il nome
+    # commerciale, "Renault / CLIO 2a SERIE", che e' quello che le altre
+    # compagnie si aspettano. Il dato Unipol resta come ripiego.
+    marca = quixa.get("marca") or v.marca
+    modello = quixa.get("modello") or v.modello
 
     valori = {
         "targa":                 v.targa,
@@ -455,8 +533,12 @@ def _campi_airtable(dati: dict) -> dict:
         "provincia":             c.residenza.provincia,
         "cellulare":             c.cellulare,
         "email":                 c.email,
-        "marca":                 v.marca,
-        "modello":               v.modello,
+        "marca":                 marca,
+        "modello":               modello,
+        "allestimento":          quixa.get("allestimento", ""),
+        "categoria":             v.categoria,
+        "uso_veicolo":           v.uso,
+        "valore_veicolo":        quixa.get("valore_veicolo"),
         "kw":                    v.kw,
         "cilindrata":            v.cilindrata,
         "posti":                 v.posti,
@@ -483,7 +565,7 @@ def _campi_airtable(dati: dict) -> dict:
             print(f"[BDA] non scrivo in '{colonna}': e' una colonna di lavoro "
                   f"dell'agenzia", flush=True)
             continue
-        campi[colonna] = valore
+        campi[colonna] = _adatta_valore(colonna, valore)
 
     stato = col.get("stato_bot", "Stato Bot Estrazione")
     if _chiave(stato) not in COLONNE_INTOCCABILI:
@@ -586,6 +668,26 @@ async def _estrai_e_salva(record_id: str, targa: str):
         async with bot_semaphore:
             dati = await POOL.consulta(targa)
 
+        # Quixa gira DOPO Unipol, non insieme: due Chromium contemporanei
+        # occupano circa 600 MB e Render nel piano gratuito ne mette a
+        # disposizione 512. In sequenza si resta sotto la soglia.
+        #
+        # Se Quixa fallisce non si ferma niente: i dati di Unipol sono gia' in
+        # mano e sono quelli che contano. Quixa aggiunge il nome commerciale.
+        if QUIXA_ATTIVO:
+            async with bot_semaphore:
+                esito_quixa = await consulta_quixa(targa)
+            if esito_quixa.get("ok"):
+                dati["quixa"] = esito_quixa
+                alternativi = esito_quixa.get("allestimenti_disponibili") or []
+                if len(alternativi) > 1:
+                    print(f"[QUIXA] attenzione: {len(alternativi)} allestimenti per "
+                          f"{targa}, scritto il primo. Da verificare a mano: "
+                          f"{' / '.join(alternativi[:5])}", flush=True)
+            else:
+                print(f"[QUIXA] nessun dato per {targa}: "
+                      f"{esito_quixa.get('errore')}", flush=True)
+
         esito = _scrivi_su_airtable(record_id, _campi_airtable(dati))
 
         if esito["ok"]:
@@ -684,6 +786,7 @@ async def stato():
     info = {
         "motore_preventivatore": "attivo",
         "motore_banca_dati": "attivo" if MOTORE_BDA_ATTIVO else f"spento ({ERRORE_BDA})",
+        "motore_quixa": "attivo" if QUIXA_ATTIVO else f"spento ({ERRORE_QUIXA})",
         "credenziali_unipol": "presenti" if (UNIPOL_USER and UNIPOL_PASS and UNIPOL_TOTP_SECRET) else "MANCANTI",
         "credenziali_airtable": "presenti" if (AIRTABLE_API_KEY and AIRTABLE_BASE_ID) else "MANCANTI",
         "sessioni_configurate": os.getenv("UNIPOL_SESSIONI", "1"),
