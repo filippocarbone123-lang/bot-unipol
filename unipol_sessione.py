@@ -159,10 +159,24 @@ class SessioneUnipol:
         return datetime.now() - self._ultimo_uso < timedelta(minutes=MINUTI_VITA_SESSIONE)
 
     async def avvia(self) -> None:
-        """Apre il browser, fa login e si porta sulla maschera BDA."""
+        """
+        Apre il browser, fa login e si porta sulla maschera BDA.
+
+        Se durante il percorso emerge che la sessione riusata era scaduta, si
+        ricomincia una volta sola con un login pulito: e' il caso tipico del
+        servizio riacceso dopo ore, con i cookie sul disco ormai vecchi.
+        """
         await self._apri_browser()
-        await self._login()
-        await self._vai_alla_maschera()
+        try:
+            await self._login()
+            await self._vai_alla_maschera()
+        except SessioneScaduta as e:
+            _log(f"{e} — riparto con un login pulito")
+            self._dimentica_cookie()
+            await self.chiudi()
+            await self._apri_browser()
+            await self._login()
+            await self._vai_alla_maschera()
         self._ultimo_uso = datetime.now()
 
     async def chiudi(self) -> None:
@@ -205,6 +219,35 @@ class SessioneUnipol:
 
     # -- login --------------------------------------------------------------
 
+    async def _sessione_valida(self, pagina: Page) -> bool:
+        """
+        Verifica di essere davvero autenticati.
+
+        Il controllo cerca gli elementi della barra di Leonardo, che esistono
+        solo dopo il login. Il controllo precedente era all'incontrario ("se
+        non vedo il campo Username allora sono dentro") ed e' proprio quello
+        che ha fatto fallire l'estrazione: non vedere la maschera di login puo'
+        voler dire tutt'altro, una pagina di errore o un reindirizzamento.
+        L'assenza di una prova non e' una prova.
+        """
+        try:
+            testo = await pagina.inner_text("body", timeout=8_000)
+        except Exception:
+            return False
+        if re.search(r"Username|Password|verification code", testo[:3_000], re.I):
+            return False
+        return bool(re.search(r"\bStrumenti\b|\bAgenda\b|Clienti e scadenze",
+                              testo[:6_000], re.I))
+
+    def _dimentica_cookie(self) -> None:
+        """Cancella lo stato salvato: era scaduto e ha portato fuori strada."""
+        try:
+            if FILE_STATO.exists():
+                FILE_STATO.unlink()
+                _log("cookie salvati scaduti, buttati via")
+        except Exception:
+            pass
+
     async def _login(self) -> None:
         if not (UNIPOL_USER and UNIPOL_PASS and UNIPOL_TOTP_SECRET):
             raise ErroreUnipol(
@@ -217,13 +260,25 @@ class SessioneUnipol:
         await page.goto(LOGIN_URL, wait_until="commit", timeout=40_000)
         await page.wait_for_timeout(1_500)
 
-        # Se i cookie salvati erano ancora buoni, il portale ci ha gia' fatti
-        # entrare e la maschera di login non compare.
         campo_user = page.locator('input[name="Username" i], input[name="username" i]').first
+
+        # Scorciatoia con i cookie salvati: si accetta solo se, andando su
+        # Leonardo, la barra dei menu c'e' davvero.
         if not await campo_user.count():
-            _log("1/6 sessione precedente ancora valida, login non necessario")
-            await self._salva_stato()
-            return
+            try:
+                await page.goto(LEONARDO_URL, wait_until="domcontentloaded", timeout=25_000)
+                await page.wait_for_timeout(2_500)
+            except Exception:
+                pass
+            if await self._sessione_valida(page):
+                _log("1/6 sessione precedente ancora valida, login non necessario")
+                await self._salva_stato()
+                return
+            _log("1/6 la sessione salvata non e' piu' valida, rifaccio il login")
+            self._dimentica_cookie()
+            await page.goto(LOGIN_URL, wait_until="commit", timeout=40_000)
+            await page.wait_for_timeout(1_500)
+            campo_user = page.locator('input[name="Username" i], input[name="username" i]').first
 
         await campo_user.wait_for(state="visible", timeout=20_000)
         await campo_user.fill(UNIPOL_USER)
@@ -391,6 +446,15 @@ class SessioneUnipol:
 
         for voce in voci_intermedie:
             if not await self._clic_menu(leonardo, voce):
+                # Prima di dare la colpa al portale, si verifica di essere
+                # ancora autenticati: un menu che non c'e' quasi sempre
+                # significa sessione scaduta, non voce rinominata.
+                if not await self._sessione_valida(leonardo):
+                    self._dimentica_cookie()
+                    raise SessioneScaduta(
+                        f"Sessione scaduta: la barra di Leonardo non e' "
+                        f"raggiungibile, quindi '{voce}' non poteva esserci."
+                    )
                 raise ErroreUnipol(
                     f"Voce di menu '{voce}' non trovata dentro Leonardo. "
                     f"Percorso atteso: {' > '.join(PERCORSO_MENU)}. "
