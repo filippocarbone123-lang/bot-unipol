@@ -302,27 +302,48 @@ class SessioneUnipol:
 
     async def _quale_schermata(self, pagina: Page) -> str:
         """
-        Riconosce a che punto del login siamo.
+        Riconosce a quale delle tre schermate di accesso siamo.
 
-        Serve perche' contare sui tempi non funziona: dopo aver inviato le
-        credenziali la pagina impiega un attimo a cambiare, e cercando subito
-        "il primo pulsante" si finisce col ripremere quello di login, tornando
-        al punto di partenza. Meglio guardare cosa c'e' a schermo.
+        Il portale ne mette tre in fila:
+          1. "Sistema di autenticazione Unipol" - utente, password, dominio
+          2. "Autenticazione sistemi Unipol"    - Microsoft MFA: si lascia il
+             campo VUOTO e si preme Logon
+          3. "Enter Your Microsoft verification code" - qui va il codice TOTP
+
+        La seconda contiene un campo di tipo password pur non essendo la
+        maschera delle credenziali. Riconoscerla dal tipo di campo, come
+        facevo prima, portava a dichiarare "credenziali rifiutate" mentre le
+        credenziali erano giuste. Si distingue dal testo, non dai campi.
         """
         try:
             testo = await pagina.inner_text("body", timeout=6_000)
         except Exception:
             return "sconosciuta"
 
-        if re.search(r"verification code|codice di verifica|Enter Your", testo, re.I):
+        testa = testo[:6_000]
+
+        # 3. Schermata del codice.
+        if re.search(r"verification code|codice di verifica", testa, re.I):
             return "otp"
-        if re.search(r"\bStrumenti\b|\bAgenda\b|Clienti e scadenze", testo[:6_000], re.I):
+
+        # Dentro al portale.
+        if re.search(r"\bStrumenti\b|\bAgenda\b|Clienti e scadenze", testa, re.I):
             return "dentro"
+
+        # 2. Schermata Microsoft MFA: campo da lasciare vuoto.
+        if re.search(r"Microsoft MFA|Autenticazione sistemi", testa, re.I):
+            return "mfa"
+
+        # 1. Maschera delle credenziali: la riconosce il menu a tendina
+        # Dominio, che sulle altre due schermate non esiste.
         try:
-            if await pagina.locator('input[type="password"]').first.count():
+            if await pagina.locator('select[name="domain" i]').first.count():
                 return "credenziali"
         except Exception:
             pass
+        if re.search(r"Sistema di autenticazione", testa, re.I):
+            return "credenziali"
+
         try:
             if await pagina.locator('input[type="submit"], button').first.is_visible(timeout=1_500):
                 return "intermedia"
@@ -334,9 +355,8 @@ class SessioneUnipol:
         """
         Attraversa le schermate fra le credenziali e l'ingresso nel portale.
 
-        Fra password e codice OTP c'e' una schermata intermedia con un solo
-        pulsante. Invece di presumere quante siano e quanto durino, si guarda
-        ogni volta dove siamo e si fa la mossa giusta.
+        A ogni giro guarda dove siamo e fa la mossa giusta, invece di
+        presumere quante schermate ci siano e quanto ci mettano.
         """
         page = self._pagina
         otp_inserito = False
@@ -356,23 +376,33 @@ class SessioneUnipol:
                 otp_inserito = True
                 continue
 
-            if schermata == "intermedia":
+            if schermata in ("mfa", "intermedia"):
+                # Sulla schermata Microsoft MFA il campo va lasciato vuoto:
+                # scrivendoci dentro si chiede la notifica sul telefono, che
+                # nessuno puo' approvare da qui.
+                if schermata == "mfa" and tentativo == 0:
+                    _log("2/6 schermata Microsoft MFA, proseguo senza compilare")
                 try:
-                    await page.locator('input[type="submit"], button').first.click(force=True)
+                    for selettore in ('input[value*="Logon" i]', 'input[type="submit"]',
+                                      'button[type="submit"]', 'button'):
+                        bottone = page.locator(selettore).first
+                        if await bottone.count() and await bottone.is_visible(timeout=1_200):
+                            await bottone.click(force=True)
+                            break
                     await page.wait_for_load_state("domcontentloaded", timeout=15_000)
                 except Exception:
                     pass
                 continue
 
-            if schermata == "credenziali" and tentativo > 3:
+            if schermata == "credenziali" and tentativo > 4:
                 raise ErroreUnipol(
-                    "Il portale e' tornato alla maschera delle credenziali: "
-                    "utente o password non accettati."
+                    "Il portale resta sulla maschera delle credenziali: "
+                    "utente, password o dominio non accettati."
                 )
 
         raise ErroreUnipol(
-            "Login non completato: la schermata del codice OTP non e' comparsa. "
-            "Se accedendo a mano il portale chiede passaggi diversi, segnalamelo."
+            "Login non completato: la schermata del codice non e' comparsa. "
+            "Se entrando a mano il portale chiede passaggi diversi, segnalamelo."
         )
 
     async def _inserisci_otp(self) -> None:
@@ -387,6 +417,7 @@ class SessioneUnipol:
 
         campo = None
         for selettore in ('input[type="text"]:not([disabled])',
+                          'input[type="password"]:not([disabled])',
                           'input[type="number"]:not([disabled])',
                           'input[type="tel"]',
                           'input:not([type="hidden"]):not([type="submit"])'):
