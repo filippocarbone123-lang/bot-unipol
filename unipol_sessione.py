@@ -292,13 +292,7 @@ class SessioneUnipol:
                 await dominio.select_option(value=UNIPOL_DOMINIO, timeout=3_000)
 
         await page.locator('input[type="submit"], button').first.click()
-
-        conferma = page.locator('input[type="submit"], button').first
-        await conferma.wait_for(state="visible", timeout=25_000)
-        await conferma.click()
-
-        _log("2/6 utente e password inviati, ora il codice OTP")
-        await self._inserisci_otp()
+        await self._completa_mfa()
 
         # Il portale registra la sessione di sicurezza lato server.
         _log("3/6 OTP inviato, attesa registrazione sessione (6s)")
@@ -306,29 +300,130 @@ class SessioneUnipol:
         await self._salva_stato()
         _log("3/6 login completato")
 
-    async def _inserisci_otp(self) -> None:
+    async def _quale_schermata(self, pagina: Page) -> str:
         """
-        Inserisce il codice TOTP.
+        Riconosce a che punto del login siamo.
 
-        Un codice TOTP vale 30 secondi e Unipol non accetta due volte lo stesso.
-        Se abbiamo appena usato questo codice, aspettiamo la finestra successiva
-        invece di farci rifiutare il login.
+        Serve perche' contare sui tempi non funziona: dopo aver inviato le
+        credenziali la pagina impiega un attimo a cambiare, e cercando subito
+        "il primo pulsante" si finisce col ripremere quello di login, tornando
+        al punto di partenza. Meglio guardare cosa c'e' a schermo.
+        """
+        try:
+            testo = await pagina.inner_text("body", timeout=6_000)
+        except Exception:
+            return "sconosciuta"
+
+        if re.search(r"verification code|codice di verifica|Enter Your", testo, re.I):
+            return "otp"
+        if re.search(r"\bStrumenti\b|\bAgenda\b|Clienti e scadenze", testo[:6_000], re.I):
+            return "dentro"
+        try:
+            if await pagina.locator('input[type="password"]').first.count():
+                return "credenziali"
+        except Exception:
+            pass
+        try:
+            if await pagina.locator('input[type="submit"], button').first.is_visible(timeout=1_500):
+                return "intermedia"
+        except Exception:
+            pass
+        return "sconosciuta"
+
+    async def _completa_mfa(self) -> None:
+        """
+        Attraversa le schermate fra le credenziali e l'ingresso nel portale.
+
+        Fra password e codice OTP c'e' una schermata intermedia con un solo
+        pulsante. Invece di presumere quante siano e quanto durino, si guarda
+        ogni volta dove siamo e si fa la mossa giusta.
         """
         page = self._pagina
-        campo = page.locator('input[type="text"], input[type="number"], input').first
-        await campo.wait_for(state="visible", timeout=25_000)
+        otp_inserito = False
+
+        for tentativo in range(40):
+            await page.wait_for_timeout(1_000)
+            schermata = await self._quale_schermata(page)
+
+            if schermata == "dentro":
+                _log("2/6 accesso completato")
+                return
+
+            if schermata == "otp":
+                if otp_inserito:
+                    continue          # gia' inviato, si aspetta il passaggio
+                await self._inserisci_otp()
+                otp_inserito = True
+                continue
+
+            if schermata == "intermedia":
+                try:
+                    await page.locator('input[type="submit"], button').first.click(force=True)
+                    await page.wait_for_load_state("domcontentloaded", timeout=15_000)
+                except Exception:
+                    pass
+                continue
+
+            if schermata == "credenziali" and tentativo > 3:
+                raise ErroreUnipol(
+                    "Il portale e' tornato alla maschera delle credenziali: "
+                    "utente o password non accettati."
+                )
+
+        raise ErroreUnipol(
+            "Login non completato: la schermata del codice OTP non e' comparsa. "
+            "Se accedendo a mano il portale chiede passaggi diversi, segnalamelo."
+        )
+
+    async def _inserisci_otp(self) -> None:
+        """
+        Inserisce il codice TOTP a 6 cifre.
+
+        Un codice vale 30 secondi e Unipol non accetta due volte lo stesso: se
+        abbiamo appena usato questo, si aspetta la finestra successiva invece
+        di farsi rifiutare.
+        """
+        page = self._pagina
+
+        campo = None
+        for selettore in ('input[type="text"]:not([disabled])',
+                          'input[type="number"]:not([disabled])',
+                          'input[type="tel"]',
+                          'input:not([type="hidden"]):not([type="submit"])'):
+            loc = page.locator(selettore).first
+            try:
+                if await loc.count() and await loc.is_editable(timeout=2_000):
+                    campo = loc
+                    break
+            except Exception:
+                continue
+        if campo is None:
+            raise ErroreUnipol("Schermata OTP riconosciuta ma campo non trovato")
 
         totp = pyotp.TOTP(UNIPOL_TOTP_SECRET)
         codice = totp.now()
         if codice == self.ultimo_otp:
             attesa = 30 - (int(datetime.now().timestamp()) % 30) + 1
+            _log(f"stesso codice OTP di poco fa, attendo {attesa}s la finestra nuova")
             await asyncio.sleep(attesa)
             codice = totp.now()
         self.ultimo_otp = codice
 
+        _log("2/6 inserimento codice OTP")
         await campo.fill("")
         await campo.type(codice, delay=100)
-        await page.locator('input[type="submit"], button').first.click()
+
+        for selettore in ('input[type="submit"]', 'button[type="submit"]',
+                          'input[value*="Logon" i]', 'button:has-text("Logon")',
+                          'button'):
+            bottone = page.locator(selettore).first
+            try:
+                if await bottone.count() and await bottone.is_visible(timeout=1_500):
+                    await bottone.click(force=True)
+                    return
+            except Exception:
+                continue
+        await campo.press("Enter")
 
     # -- navigazione fino alla maschera BDA ---------------------------------
 
