@@ -136,6 +136,42 @@ def _log(messaggio: str) -> None:
     print(f"[BDA] {messaggio}", flush=True)
 
 
+async def _testo_pagina(pagina, limite: int = 6_000) -> str:
+    """
+    Restituisce il testo di una pagina, anche quando non ha un <body>.
+
+    Le pagine divise in riquadri (frameset) non hanno un elemento <body>:
+    leggerlo va in timeout e ogni riconoscimento fallisce senza spiegazione.
+    Qui si prova prima il testo visibile, poi si ripiega sul codice grezzo e
+    sul contenuto dei singoli riquadri.
+    """
+    pezzi = []
+    try:
+        pezzi.append(await pagina.inner_text("body", timeout=3_000))
+    except Exception:
+        pass
+
+    if not any(p.strip() for p in pezzi):
+        try:
+            grezzo = await pagina.content()
+            senza_tag = re.sub(r"<script.*?</script>|<style.*?</style>", " ", grezzo,
+                               flags=re.S | re.I)
+            senza_tag = re.sub(r"<[^>]+>", " ", senza_tag)
+            pezzi.append(senza_tag)
+        except Exception:
+            pass
+
+    for frame in pagina.frames:
+        if frame is pagina.main_frame:
+            continue
+        try:
+            pezzi.append(await frame.inner_text("body", timeout=2_000))
+        except Exception:
+            continue
+
+    return re.sub(r"\s+", " ", " ".join(pezzi)).strip()[:limite]
+
+
 class SessioneScaduta(ErroreUnipol):
     """L'accesso non c'e' piu': serve un nuovo login."""
 
@@ -206,6 +242,22 @@ class SessioneUnipol:
         self._ultimo_uso = datetime.now()
 
     async def chiudi(self) -> None:
+        # Prima di spegnere il browser si esce dal portale, cosi' la procedura
+        # di accesso non resta aperta: e' quella che, al tentativo successivo,
+        # fa comparire "access policy evaluation is already in progress".
+        try:
+            if self._pagina and not self._pagina.is_closed():
+                for selettore in ('a:has-text("Log Out")', 'a:has-text("Logout")',
+                                  'a[href*="logout" i]', 'a[href*="hangup" i]'):
+                    bottone = self._pagina.locator(selettore).first
+                    if await bottone.count() and await bottone.is_visible(timeout=800):
+                        await bottone.click(force=True)
+                        await self._pagina.wait_for_timeout(1_500)
+                        _log("uscita dal portale eseguita")
+                        break
+        except Exception:
+            pass
+
         for risorsa, chiudi in (
             (self._contesto, "close"), (self._browser, "close"), (self._playwright, "stop"),
         ):
@@ -239,6 +291,47 @@ class SessioneUnipol:
 
     # -- login --------------------------------------------------------------
 
+    async def _sblocca_sessione_bloccata(self) -> bool:
+        """
+        Sblocca la pagina "Access policy evaluation is already in progress".
+
+        E' il sistema di accesso che protegge il portale: ogni tentativo di
+        accesso interrotto a meta' lascia una procedura aperta, e al tentativo
+        successivo mostra questa pagina invece della maschera. La pagina stessa
+        offre la soluzione, un collegamento "here" che apre una sessione nuova.
+
+        Senza questo, dopo qualche tentativo fallito il bot non riesce piu' ad
+        accedere e sembra un blocco: e' invece la coda dei propri errori.
+        """
+        page = self._pagina
+        testo = await _testo_pagina(page, 2_000)
+        if not re.search(r"access policy evaluation is already in progress|"
+                         r"create a new session", testo, re.I):
+            return False
+
+        _log("procedura di accesso rimasta aperta, ne apro una nuova")
+
+        for selettore in ('a:has-text("here")', 'a[href*="my.policy"]',
+                          'a[href*="hangup"]', 'a[href*="logout"]', 'a'):
+            try:
+                collegamento = page.locator(selettore).first
+                if await collegamento.count() and await collegamento.is_visible(timeout=1_500):
+                    await collegamento.click(force=True)
+                    await page.wait_for_load_state("domcontentloaded", timeout=20_000)
+                    await page.wait_for_timeout(2_500)
+                    return True
+            except Exception:
+                continue
+
+        # Nessun collegamento cliccabile: si azzerano i cookie, che e' l'altro
+        # modo di far dimenticare al portale la procedura in sospeso.
+        try:
+            await self._contesto.clear_cookies()
+            _log("nessun collegamento trovato, azzerati i cookie della sessione")
+            return True
+        except Exception:
+            return False
+
     async def _apri_maschera_login(self):
         """
         Apre la pagina di accesso e restituisce il campo Utente.
@@ -258,16 +351,27 @@ class SessioneUnipol:
             except Exception as e:
                 _log(f"  {indirizzo} non raggiungibile ({type(e).__name__})")
                 continue
-            await page.wait_for_timeout(2_000)
+            await page.wait_for_timeout(2_500)
 
-            campo = page.locator(selettore).first
-            try:
-                await campo.wait_for(state="visible", timeout=8_000)
-                if indirizzo != LOGIN_URL:
-                    _log(f"  maschera trovata su {indirizzo}")
-                return campo
-            except Exception:
-                _log(f"  nessuna maschera su {indirizzo}")
+            # Due passate: se la prima trova la pagina della procedura gia'
+            # aperta, la si sblocca e si riprova sullo stesso indirizzo.
+            for passata in range(2):
+                for frame in [page.main_frame, *page.frames]:
+                    campo = frame.locator(selettore).first
+                    try:
+                        if await campo.count() and await campo.is_visible(timeout=3_000):
+                            dove = "" if frame is page.main_frame else " (dentro un riquadro)"
+                            if indirizzo != LOGIN_URL or dove or passata:
+                                _log(f"  maschera trovata su {indirizzo}{dove}")
+                            return campo
+                    except Exception:
+                        continue
+
+                if passata == 0 and await self._sblocca_sessione_bloccata():
+                    continue
+                break
+
+            _log(f"  nessuna maschera su {indirizzo}")
 
         await self._descrivi_pagina(page)
         raise ErroreUnipol(
@@ -361,11 +465,11 @@ class SessioneUnipol:
             titolo = await pagina.title()
         except Exception:
             titolo = "?"
+        testo = (await _testo_pagina(pagina, 500)) or "(nessun testo leggibile)"
         try:
-            testo = (await pagina.inner_text("body", timeout=5_000))[:400]
-            testo = re.sub(r"\s+", " ", testo).strip()
-        except Exception as e:
-            testo = f"(corpo non leggibile: {type(e).__name__})"
+            riquadri = [f.url for f in pagina.frames]
+        except Exception:
+            riquadri = []
         try:
             campi = await pagina.evaluate("""() =>
                 Array.from(document.querySelectorAll('input, select, button'))
@@ -381,6 +485,7 @@ class SessioneUnipol:
         _log(f"  titolo : {titolo}")
         _log(f"  testo  : {testo}")
         _log(f"  campi  : {' | '.join(campi) if campi else 'nessuno'}")
+        _log(f"  riquadri: {len(riquadri)} -> {' | '.join(riquadri[:5])}")
         _log("--- fine descrizione ---")
 
     async def _pagina_in_errore(self) -> str:
@@ -390,11 +495,9 @@ class SessioneUnipol:
         Restituisce "" se va tutto bene, "percorso" se la sessione di lavoro
         si e' rotta (si rifanno i menu), "login" se l'accesso e' scaduto.
         """
-        try:
-            testo = await self._pagina.inner_text("body", timeout=5_000)
-        except Exception:
+        testa = await _testo_pagina(self._pagina, 4_000)
+        if not testa:
             return "percorso"
-        testa = testo[:4_000]
         if _SEGNALI_PERCORSO_ROTTO.search(testa):
             return "percorso"
         if _SEGNALI_SESSIONE_PERSA.search(testa):
@@ -480,10 +583,7 @@ class SessioneUnipol:
 
         # Ripiego: si accetta il primo campo di testo solo se la pagina e'
         # davvero la maschera di ricerca e solo se il campo e' scrivibile.
-        try:
-            testo = await self._pagina.inner_text("body", timeout=3_000)
-        except Exception:
-            return None
+        testo = await _testo_pagina(self._pagina, 4_000)
         if not re.search(r"Formato\s+targa", testo, re.I):
             return None
 
@@ -719,10 +819,7 @@ class SessioneUnipol:
         # Contiene i dati tecnici del veicolo: telaio, omologazione,
         # cilindrata, potenza, alimentazione, posti, immatricolazione.
         _log(f"targa {targa} inviata, lettura pagina dati veicolo")
-        try:
-            testo_veicolo = await page.inner_text("body", timeout=8_000)
-        except Exception:
-            testo_veicolo = ""
+        testo_veicolo = await _testo_pagina(page, 20_000)
         veicolo = parse_pagina_veicolo(testo_veicolo)
         _log(f"veicolo: {veicolo.marca or '?'} | kw {veicolo.kw} | "
              f"alim {veicolo.alimentazione} | imm {veicolo.data_immatricolazione}")
