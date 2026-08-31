@@ -172,7 +172,7 @@ class SessioneUnipol:
             await self._vai_alla_maschera()
         except SessioneScaduta as e:
             _log(f"{e} — riparto con un login pulito")
-            self._dimentica_cookie()
+            await self._pulisci_sessione()
             await self.chiudi()
             await self._apri_browser()
             await self._login()
@@ -248,38 +248,10 @@ class SessioneUnipol:
         except Exception:
             pass
 
-    async def _login(self) -> None:
-        if not (UNIPOL_USER and UNIPOL_PASS and UNIPOL_TOTP_SECRET):
-            raise ErroreUnipol(
-                "Credenziali mancanti: imposta UNIPOL_USER, UNIPOL_PASS e "
-                "UNIPOL_TOTP_SECRET nel file .env"
-            )
-
+    async def _compila_credenziali(self) -> None:
+        """Riempie utente, password e dominio sulla prima schermata."""
         page = self._pagina
-        _log("1/6 apertura pagina di login")
-        await page.goto(LOGIN_URL, wait_until="commit", timeout=40_000)
-        await page.wait_for_timeout(1_500)
-
         campo_user = page.locator('input[name="Username" i], input[name="username" i]').first
-
-        # Scorciatoia con i cookie salvati: si accetta solo se, andando su
-        # Leonardo, la barra dei menu c'e' davvero.
-        if not await campo_user.count():
-            try:
-                await page.goto(LEONARDO_URL, wait_until="domcontentloaded", timeout=25_000)
-                await page.wait_for_timeout(2_500)
-            except Exception:
-                pass
-            if await self._sessione_valida(page):
-                _log("1/6 sessione precedente ancora valida, login non necessario")
-                await self._salva_stato()
-                return
-            _log("1/6 la sessione salvata non e' piu' valida, rifaccio il login")
-            self._dimentica_cookie()
-            await page.goto(LOGIN_URL, wait_until="commit", timeout=40_000)
-            await page.wait_for_timeout(1_500)
-            campo_user = page.locator('input[name="Username" i], input[name="username" i]').first
-
         await campo_user.wait_for(state="visible", timeout=20_000)
         await campo_user.fill(UNIPOL_USER)
         await page.locator('input[type="password"]').first.fill(UNIPOL_PASS)
@@ -291,14 +263,92 @@ class SessioneUnipol:
             except Exception:
                 await dominio.select_option(value=UNIPOL_DOMINIO, timeout=3_000)
 
+        _log("1/6 utente, password e dominio inviati")
         await page.locator('input[type="submit"], button').first.click()
-        await self._completa_mfa()
 
-        # Il portale registra la sessione di sicurezza lato server.
-        _log("3/6 OTP inviato, attesa registrazione sessione (6s)")
-        await asyncio.sleep(6)
-        await self._salva_stato()
-        _log("3/6 login completato")
+    async def _pulisci_sessione(self) -> None:
+        """
+        Cancella i cookie sul disco E quelli gia' caricati nel browser.
+
+        Cancellare solo il file non basta: i cookie erano gia' stati messi nel
+        contesto quando il browser e' partito, quindi il portale continuava a
+        vederci come mezzo autenticati e ci mandava a una schermata avanzata
+        invece della maschera di login.
+        """
+        self._dimentica_cookie()
+        try:
+            await self._contesto.clear_cookies()
+            _log("cookie della sessione azzerati anche nel browser")
+        except Exception:
+            pass
+
+    async def _login(self) -> None:
+        """
+        Porta la sessione dentro al portale, da qualunque punto si parta.
+
+        Non si pretende di trovare una schermata precisa: si guarda dove si e'
+        arrivati e si riprende da li'. Con i cookie salvati si puo' atterrare
+        gia' dentro, oppure a meta' autenticazione, oppure sulla maschera di
+        login: tutti e tre i casi sono normali e vanno gestiti.
+        """
+        if not (UNIPOL_USER and UNIPOL_PASS and UNIPOL_TOTP_SECRET):
+            raise ErroreUnipol(
+                "Credenziali mancanti: imposta UNIPOL_USER, UNIPOL_PASS e "
+                "UNIPOL_TOTP_SECRET fra le variabili d'ambiente."
+            )
+
+        page = self._pagina
+        _log("1/6 apertura pagina di login")
+        await page.goto(LOGIN_URL, wait_until="commit", timeout=40_000)
+        await page.wait_for_timeout(2_000)
+
+        for tentativo in range(2):
+            schermata = await self._quale_schermata(page)
+
+            # Gia' dentro secondo la pagina: si verifica su Leonardo, perche'
+            # una pagina generica puo' somigliare al portale senza esserlo.
+            if schermata == "dentro":
+                try:
+                    await page.goto(LEONARDO_URL, wait_until="domcontentloaded", timeout=25_000)
+                    await page.wait_for_timeout(2_500)
+                except Exception:
+                    pass
+                if await self._sessione_valida(page):
+                    _log("1/6 sessione precedente ancora valida, login non necessario")
+                    await self._salva_stato()
+                    return
+                schermata = "sconosciuta"
+
+            # A meta' autenticazione: si completa senza ripartire da capo.
+            if schermata in ("otp", "mfa", "intermedia"):
+                _log("1/6 autenticazione gia' avviata, la completo")
+                await self._completa_mfa()
+                await asyncio.sleep(6)
+                await self._salva_stato()
+                _log("3/6 login completato")
+                return
+
+            if schermata == "credenziali":
+                await self._compila_credenziali()
+                await self._completa_mfa()
+                await asyncio.sleep(6)
+                await self._salva_stato()
+                _log("3/6 login completato")
+                return
+
+            # Pagina non riconoscibile: quasi sempre e' colpa dei cookie
+            # vecchi. Si azzerano e si riparte una volta sola.
+            if tentativo == 0:
+                _log("1/6 pagina di accesso non riconosciuta, azzero la sessione e riparto")
+                await self._pulisci_sessione()
+                await page.goto(LOGIN_URL, wait_until="commit", timeout=40_000)
+                await page.wait_for_timeout(2_500)
+
+        raise ErroreUnipol(
+            "Pagina di accesso non riconosciuta nemmeno dopo aver azzerato la "
+            "sessione. Se entrando a mano vedi qualcosa di diverso dal solito, "
+            "mandami uno screenshot."
+        )
 
     async def _quale_schermata(self, pagina: Page) -> str:
         """
@@ -576,7 +626,7 @@ class SessioneUnipol:
                 # ancora autenticati: un menu che non c'e' quasi sempre
                 # significa sessione scaduta, non voce rinominata.
                 if not await self._sessione_valida(leonardo):
-                    self._dimentica_cookie()
+                    await self._pulisci_sessione()
                     raise SessioneScaduta(
                         f"Sessione scaduta: la barra di Leonardo non e' "
                         f"raggiungibile, quindi '{voce}' non poteva esserci."
