@@ -283,11 +283,9 @@ class SessioneUnipol:
         self._contesto = await self._browser.new_context(user_agent=USER_AGENT)
         self._pagina = await self._contesto.new_page()
 
-        # Immagini e font non servono e costano banda e RAM: li blocchiamo.
-        await self._contesto.route(
-            re.compile(r"\.(png|jpe?g|gif|svg|woff2?|ttf|ico)(\?|$)", re.I),
-            lambda rotta: asyncio.ensure_future(rotta.abort()),
-        )
+        # Nessun blocco di immagini o font: era un risparmio di memoria che
+        # non c'era nel codice originale e che puo' lasciare appese le
+        # richieste della pagina di accesso.
 
     # -- login --------------------------------------------------------------
 
@@ -305,14 +303,25 @@ class SessioneUnipol:
         """
         page = self._pagina
         testo = await _testo_pagina(page, 2_000)
-        if not re.search(r"access policy evaluation is already in progress|"
-                         r"create a new session", testo, re.I):
+        try:
+            indirizzo = page.url
+        except Exception:
+            indirizzo = ""
+
+        bloccata = (
+            re.search(r"access policy evaluation is already in progress|"
+                      r"create a new session|"
+                      r"your session could not be established|"
+                      r"invalid session id", testo, re.I)
+            or "my.logout.php3" in indirizzo
+        )
+        if not bloccata:
             return False
 
         _log("procedura di accesso rimasta aperta, ne apro una nuova")
 
-        for selettore in ('a:has-text("here")', 'a[href*="my.policy"]',
-                          'a[href*="hangup"]', 'a[href*="logout"]', 'a'):
+        for selettore in ('a:has-text("click here")', 'a:has-text("here")',
+                          'a[href*="my.policy"]', 'a[href*="my.logout"]', 'a'):
             try:
                 collegamento = page.locator(selettore).first
                 if await collegamento.count() and await collegamento.is_visible(timeout=1_500):
@@ -323,14 +332,13 @@ class SessioneUnipol:
             except Exception:
                 continue
 
-        # Nessun collegamento cliccabile: si azzerano i cookie, che e' l'altro
-        # modo di far dimenticare al portale la procedura in sospeso.
-        try:
-            await self._contesto.clear_cookies()
-            _log("nessun collegamento trovato, azzerati i cookie della sessione")
-            return True
-        except Exception:
-            return False
+        # I cookie NON si azzerano.
+        #
+        # Il sistema di accesso ne usa uno per tenere traccia della procedura
+        # in corso: cancellandolo, la richiesta successiva arriva senza
+        # riferimento e il portale risponde "errorcode=19 - non trovo le
+        # informazioni di sessione". Era un rimedio che causava il problema.
+        return False
 
     async def _apri_maschera_login(self):
         """
@@ -346,12 +354,15 @@ class SessioneUnipol:
 
         indirizzi = [LOGIN_URL] + [u for u in LOGIN_ALTERNATIVI if u != LOGIN_URL]
         for indirizzo in indirizzi:
+            # 'commit' come nel codice originale: la pagina di accesso passa
+            # da una schermata di caricamento intermedia, e aspettare che il
+            # documento sia completo puo' non succedere mai.
             try:
-                await page.goto(indirizzo, wait_until="domcontentloaded", timeout=30_000)
+                await page.goto(indirizzo, wait_until="commit", timeout=30_000)
             except Exception as e:
                 _log(f"  {indirizzo} non raggiungibile ({type(e).__name__})")
                 continue
-            await page.wait_for_timeout(2_500)
+            await page.wait_for_timeout(4_000)
 
             # Due passate: se la prima trova la pagina della procedura gia'
             # aperta, la si sblocca e si riprova sullo stesso indirizzo.
