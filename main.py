@@ -780,6 +780,69 @@ async def consulta_lotto(payload: dict):
     }
 
 
+@app.get("/debug/rete")
+async def debug_rete():
+    """
+    Verifica se il server Unipol risponde a Render, senza aprire il browser.
+
+    E' una semplice chiamata di rete: risponde in pochi secondi e distingue
+    le due situazioni che contano.
+
+      "connessione rifiutata" o "tempo scaduto" su tutti gli indirizzi
+          -> il server non risponde a Render. Se dal tuo browser entri, e'
+             un blocco sull'indirizzo di rete del bot.
+
+      un codice HTTP qualsiasi (200, 403, 503)
+          -> il server risponde, il problema e' un altro.
+
+        https://bot-unipol.onrender.com/debug/rete
+    """
+    from unipol_sessione import BASE_URL, LOGIN_ALTERNATIVI
+
+    def _prova(indirizzo: str) -> dict:
+        inizio = datetime.now()
+        try:
+            res = requests.get(
+                indirizzo, timeout=10, allow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                       "Chrome/122.0.0.0 Safari/537.36"},
+            )
+            testo = re.sub(r"\s+", " ", res.text)[:300]
+            return {
+                "indirizzo": indirizzo,
+                "codice_http": res.status_code,
+                "indirizzo_finale": res.url,
+                "secondi": round((datetime.now() - inizio).total_seconds(), 1),
+                "contiene_maschera_accesso": bool(
+                    re.search(r'name=["\']?Username', res.text, re.I)),
+                "inizio_pagina": testo,
+            }
+        except Exception as e:
+            return {
+                "indirizzo": indirizzo,
+                "errore": f"{type(e).__name__}: {str(e)[:200]}",
+                "secondi": round((datetime.now() - inizio).total_seconds(), 1),
+            }
+
+    indirizzi = [BASE_URL] + LOGIN_ALTERNATIVI
+    esiti = await asyncio.gather(
+        *(asyncio.to_thread(_prova, u) for u in dict.fromkeys(indirizzi))
+    )
+
+    risponde = any("codice_http" in e for e in esiti)
+    return {
+        "il_server_risponde_a_render": risponde,
+        "come_leggerlo": (
+            "Il server risponde: il blocco non e' a livello di rete."
+            if risponde else
+            "Nessuna risposta. Se dal tuo browser entri normalmente, "
+            "l'indirizzo di rete di Render e' bloccato o filtrato."
+        ),
+        "prove": esiti,
+    }
+
+
 @app.get("/debug/login")
 async def debug_login():
     """
@@ -806,13 +869,23 @@ async def debug_login():
             try:
                 esiti = []
                 risposta = None
-                for indirizzo in [LOGIN_URL] + [u for u in LOGIN_ALTERNATIVI if u != LOGIN_URL]:
+                for indirizzo in ([LOGIN_URL] if LOGIN_URL else []) + [
+                        u for u in LOGIN_ALTERNATIVI if u != LOGIN_URL]:
                     try:
-                        risposta = await page.goto(indirizzo, wait_until="domcontentloaded",
-                                                   timeout=30_000)
-                        await page.wait_for_timeout(2_000)
-                        trovata = await page.locator(
-                            'input[name="Username" i], input[name="username" i]').first.count()
+                        # Attese corte: tre indirizzi da trenta secondi
+                        # superavano il limite oltre il quale Render chiude
+                        # la connessione, e la pagina non si apriva mai.
+                        risposta = await page.goto(indirizzo, wait_until="commit",
+                                                   timeout=12_000)
+                        await page.wait_for_timeout(1_500)
+                        trovata = 0
+                        for f in page.frames:
+                            try:
+                                trovata += await f.locator(
+                                    'input[name="Username" i], '
+                                    'input[name="username" i]').count()
+                            except Exception:
+                                continue
                         esiti.append({
                             "indirizzo": indirizzo,
                             "codice_http": risposta.status if risposta else None,
@@ -825,7 +898,8 @@ async def debug_login():
                         esiti.append({"indirizzo": indirizzo,
                                       "errore": f"{type(e).__name__}: {str(e)[:120]}"})
                 await page.wait_for_timeout(1_000)
-                testo = await page.inner_text("body", timeout=8_000)
+                from unipol_sessione import _testo_pagina
+                testo = await _testo_pagina(page, 2_000)
                 campi = await page.evaluate("""() =>
                     Array.from(document.querySelectorAll('input, select, button'))
                          .slice(0, 30)
@@ -842,7 +916,8 @@ async def debug_login():
                     "indirizzo_finale": page.url,
                     "codice_http": risposta.status if risposta else None,
                     "titolo": await page.title(),
-                    "testo_pagina": re.sub(r"\s+", " ", testo)[:1500],
+                    "testo_pagina": testo,
+                    "riquadri": [f.url for f in page.frames],
                     "campi_presenti": campi,
                 }
             except Exception as e:

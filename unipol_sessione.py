@@ -61,13 +61,28 @@ BASE_URL = os.getenv("UNIPOL_BASE_URL", "https://essig.unipolsai.it")
 # barra degli indirizzi del video del login, ed e' il nome standard della
 # pagina di accesso dei sistemi F5, quelli davanti al portale Unipol. Con il
 # trattino il server risponde "404 Not Found - IBM_HTTP_Server".
-LOGIN_URL = os.getenv("UNIPOL_LOGIN_URL", f"{BASE_URL}/my.policy")
+LOGIN_URL = os.getenv("UNIPOL_LOGIN_URL", "")   # vuoto = si parte da Leonardo
 
-# Se la maschera non compare, si provano questi altri indirizzi: chiedendo una
-# pagina protetta, il sistema di accesso reindirizza da solo alla sua maschera.
+# Pagina di partenza dentro Leonardo, da cui si apre il menu Strumenti.
+LEONARDO_URL = os.getenv(
+    "UNIPOL_LEONARDO_URL",
+    f"{BASE_URL}/WorkspaceWeb/app/configuratore_questionari/questionario",
+)
+
+# Da dove si entra, in ordine.
+#
+# Si parte da una pagina PROTETTA, non dalla maschera di accesso. Chiedendo
+# una pagina protetta succedono le due cose giuste insieme: se la sessione
+# esiste gia' si entra e basta, se non esiste il sistema ne crea una e
+# reindirizza lui alla maschera.
+#
+# Chiedere /my.policy per primo e' l'errore opposto: quello e' l'indirizzo a
+# cui il modulo di accesso INVIA i dati, non l'ingresso. Senza una sessione
+# gia' avviata risponde "Your session could not be established".
 LOGIN_ALTERNATIVI = [
-    f"{BASE_URL}/my.policy",
+    LEONARDO_URL,
     f"{BASE_URL}/",
+    f"{BASE_URL}/my.policy",
     f"{BASE_URL}/my-policy",
 ]
 
@@ -79,11 +94,6 @@ URL_RCAUTO_DIRETTO = os.getenv(
     f"{BASE_URL}/Danni/essigRA/danni/rcauto/paginaD1.do",
 )
 
-# Pagina di partenza dentro Leonardo, da cui si apre il menu Strumenti.
-LEONARDO_URL = os.getenv(
-    "UNIPOL_LEONARDO_URL",
-    f"{BASE_URL}/WorkspaceWeb/app/configuratore_questionari/questionario",
-)
 
 # Percorso reale dentro il menu Strumenti di Leonardo:
 #     Strumenti -> (sezione SERVIZI) DANNI -> RCA AUTO -> CONSULTAZIONE BDA
@@ -352,7 +362,9 @@ class SessioneUnipol:
         page = self._pagina
         selettore = 'input[name="Username" i], input[name="username" i]'
 
-        indirizzi = [LOGIN_URL] + [u for u in LOGIN_ALTERNATIVI if u != LOGIN_URL]
+        indirizzi = ([LOGIN_URL] if LOGIN_URL else []) + [
+            u for u in LOGIN_ALTERNATIVI if u != LOGIN_URL
+        ]
         for indirizzo in indirizzi:
             # 'commit' come nel codice originale: la pagina di accesso passa
             # da una schermata di caricamento intermedia, e aspettare che il
@@ -364,16 +376,23 @@ class SessioneUnipol:
                 continue
             await page.wait_for_timeout(4_000)
 
-            # Due passate: se la prima trova la pagina della procedura gia'
-            # aperta, la si sblocca e si riprova sullo stesso indirizzo.
+            # Se la pagina protetta si apre davvero, siamo gia' dentro e non
+            # c'e' niente da accedere.
+            testo = await _testo_pagina(page, 4_000)
+            if re.search(r"\bStrumenti\b|Clienti e scadenze", testo, re.I):
+                _log("  portale gia' aperto, accesso non necessario")
+                self._pagina_leonardo = page
+                return None
+
+            # Due passate: se la prima trova una pagina di errore del sistema
+            # di accesso, la si sblocca e si riprova sullo stesso indirizzo.
             for passata in range(2):
                 for frame in [page.main_frame, *page.frames]:
                     campo = frame.locator(selettore).first
                     try:
                         if await campo.count() and await campo.is_visible(timeout=3_000):
                             dove = "" if frame is page.main_frame else " (dentro un riquadro)"
-                            if indirizzo != LOGIN_URL or dove or passata:
-                                _log(f"  maschera trovata su {indirizzo}{dove}")
+                            _log(f"  maschera di accesso trovata su {indirizzo}{dove}")
                             return campo
                     except Exception:
                         continue
@@ -413,6 +432,12 @@ class SessioneUnipol:
 
         _log("1/4 inserimento utente e password")
         campo_user = await self._apri_maschera_login()
+
+        if campo_user is None:
+            # Il portale era gia' aperto: niente credenziali, niente OTP.
+            _log("accesso gia' attivo, salto le credenziali")
+            return
+
         await campo_user.fill(UNIPOL_USER)
 
         await page.locator('input[type="password"]').first.fill(UNIPOL_PASS)
