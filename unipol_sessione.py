@@ -629,9 +629,26 @@ class SessioneUnipol:
             leonardo = await self._contesto.new_page()
         self._pagina_leonardo = leonardo
 
-        _log(f"4/6 apertura Leonardo: {LEONARDO_URL}")
-        await leonardo.goto(LEONARDO_URL, wait_until="domcontentloaded", timeout=30_000)
-        await leonardo.wait_for_timeout(3_000)
+        # Il login si e' gia' portato su Leonardo ("forzatura URL"). Se siamo
+        # ancora li', non si ricarica: aprirlo una seconda volta era proprio
+        # cio' che andava in timeout.
+        try:
+            gia_su_leonardo = "WorkspaceWeb" in (leonardo.url or "")
+        except Exception:
+            gia_su_leonardo = False
+
+        if gia_su_leonardo:
+            _log("4/6 gia' su Leonardo, non ricarico")
+        else:
+            _log(f"4/6 apertura Leonardo: {LEONARDO_URL}")
+            # 'commit' come nel login e come nel codice originale: aspettare
+            # il documento completo su questa pagina puo' non succedere mai.
+            try:
+                await leonardo.goto(LEONARDO_URL, wait_until="commit", timeout=30_000)
+            except Exception as e:
+                _log(f"4/6 caricamento lento ({type(e).__name__}), proseguo")
+            await leonardo.wait_for_timeout(4_000)
+
         await self._chiudi_segnalazione()
 
         voci_intermedie = PERCORSO_MENU[:-1]
